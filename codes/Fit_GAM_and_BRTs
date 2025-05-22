@@ -1,1 +1,896 @@
+#################################################################################################
 
+#########Create GAM, BRT and ensemble models for both species####################################
+
+#########Evaluate the models and use them to predict for the full area in the study period#######
+
+#### Created by Maria Inês Pinheiro da Silva and supervised by Sergi Pérez-Jorge ################
+
+############################## Date: 22  May 2025 ###############################################
+
+#################################################################################################
+
+
+# Set working directories
+
+path="path to tuna-fishing boat segments"
+envdir="path to store environmental data"
+spdymdir="CMEMS_Seapodym_forcing_variables"
+shapefile="path to shapefiles of the Azores"
+prediction_envdir="path to store environmental data for the predictions"
+models="path to store data for models"
+
+brtdir=paste(models,"/Brt outputs/", sep="")
+gamdir=paste(models,"/gam outputs/", sep="")
+ensbldir=paste(models,"/ensbl outputs/", sep="")
+plotdir=paste(models,"/plots/", sep="")
+mapsdir=paste0(models, "/maps/", sep="")
+
+## Files obtain on the previous step (code = "3_Data cleanning and exploration")
+df<-read.csv(paste(models,"df_models.csv",header=T))
+
+grid<-readRDS(paste(prediction_envdir, "grid_simp.RDS"))
+
+Az<- sf::st_read(paste(shapefile,"Azores.shp"))
+
+grid$Date<-as.POSIXct(grid$Date, tz="Europe/London")
+grid$Date<-as.character(grid$Date)
+grid$Date<-as.Date(grid$Date)
+grid$eff_length<-mean(df$eff_length)
+grid$depth<-grid$depth*-1
+#grid$eff_length<-grid$eff_length/1000
+grid$month_f<-as.factor(grid$month)
+grid$year_f<-as.factor(grid$year)
+
+#####Load Functions####
+#R2 BRT
+pseudoR2.BRT <- function(x){
+  d2 <- 1-(x$self.statistics$mean.resid/x$self.statistics$mean.null)
+  return(d2)
+} 
+
+#5-fold 75/25 evaluation
+ev_kfold<-function(sp, df, gbm.x, gbm.y, formula,ID){
+  sp<-sp
+  df_k <- df
+  df_k$Kset <- kfold(df_k,5) #randomly allocate k groups
+  Eval_brt <- as.data.frame(matrix(data=0,nrow=5,ncol=7))
+  colnames(Eval_brt) <- c("k","RMSE","DevianceExplained(%)","AUC","TSS","cor","PredRatio")
+  Eval_gam <- as.data.frame(matrix(data=0,nrow=5,ncol=7))
+  colnames(Eval_gam) <- c("k","AIC","DevianceExplained(%)","AUC","TSS","cor","PredRatio")
+  Eval_ensbl <- as.data.frame(matrix(data=0,nrow=5,ncol=7))
+  colnames(Eval_ensbl) <- c("k","RMSE","DevianceExplained(%)","AUC","TSS","cor","PredRatio")
+  comp_perf<-list()
+  counter=1
+  for (k in 1:5){
+    print(k)
+    df_fold<-df_k[df_k$Kset==k,]
+    f75<-floor((nrow(df_fold)/4)*3)
+    df_train<-df_fold[sample(nrow(df_fold),f75),]
+    df_test<-df_fold[sample(nrow(df_fold),nrow(df_fold)-f75),]
+    offset_train=log(df_train$eff_length)
+    offset_test=log(df_test$eff_length)
+    gam<-mgcv::gam(formula=formula, data=df_train, family=binomial, method="REML")
+    gam_summ<-summary(gam)
+    brt <- gbm.step(data=df_train, gbm.x= gbm.x, gbm.y = gbm.y, offset=offset_train,
+                    family="bernoulli", tree.complexity=3,
+                    learning.rate = 0.001, bag.fraction = 0.6)
+    pred<-data.frame(predict.gbm(brt,df_test, 
+                                 n.trees=brt$gbm.call$best.trees, type="link"))
+    names(pred)<-"brt"
+    pred_testdata <- data.frame(
+      gam = as.vector(predict(gam, df_test, type='response')),
+      brt = as.vector(1/(1+exp(-offset_test-pred)))
+    )
+    observed <- as_vector(df_test %>% pull(gbm.y))
+    d <- cbind(observed, pred_testdata$gam)
+    pres <- as.numeric(d[d[,1]==1,2])
+    abs <- as.numeric(d[d[,1]==0,2])
+    e <- evaluate(p=pres, a=abs)
+    Eval_gam[counter,1]<-k
+    Eval_gam[counter,2]<-gam$aic
+    Eval_gam[counter,3]<-(gam_summ$dev.expl)*100
+    Eval_gam[counter,4]<-e@auc
+    Eval_gam[counter,5]<-max(e@TPR + e@TNR-1)
+    Eval_gam[counter,6]<-cor(pred_testdata$gam,observed, method="spearman") #Spearman correlation
+    Eval_gam[counter,7] <-sum(pred_testdata$gam)/sum(observed)
+    ext.residual.deviance <- calc.deviance(obs=observed, pred=pred_testdata$brt, family="bernoulli", calc.mean=TRUE)
+    null.dev =  calc.deviance(observed,rep(mean(observed),length(observed)), family="bernoulli", calc.mean=T)
+    dev=(null.dev - ext.residual.deviance)/null.dev 
+    d <- cbind(observed, pred_testdata$brt)
+    pres <- as.numeric(d[d[,1]==1,2])
+    abs <- as.numeric(d[d[,1]==0,2])
+    e <- evaluate(p=pres, a=abs)
+    Eval_brt[counter,1] <- k
+    Eval_brt[counter,2] <- sqrt(mean((pred_testdata$brt-observed)^2))#RMSE
+    Eval_brt[counter,3] <-dev*100 #External deviance explained
+    Eval_brt[counter,4] <-e@auc #C-index
+    Eval_brt[counter,5] <-max(e@TPR + e@TNR-1)
+    Eval_brt[counter,6] <-cor(pred_testdata$brt,observed, method="spearman") #Spearman correlation
+    Eval_brt[counter,7] <-sum(pred_testdata$brt)/sum(observed) #Ratio of predictions to actual values
+    comp_perf[[counter]]<-data.frame(alg=c("gam","brt"))
+    comp_perf[[counter]]$AUC<-rbind(Eval_gam$AUC[k],Eval_brt$AUC[k])
+    row.names(comp_perf[[counter]]) <- comp_perf[[counter]]$alg
+    colnames(comp_perf[[counter]])<-c("alg","AUC")
+    pred_testdata$ensbl <- as.vector(apply(pred_testdata, 1, weighted.mean, w=comp_perf[[counter]][names(pred_testdata),'AUC']))
+    d <- cbind(observed, pred_testdata$ensbl)
+    pres <- as.numeric(d[d[,1]==1,2])
+    abs <- as.numeric(d[d[,1]==0,2])
+    e <- evaluate(p=pres, a=abs)
+    ext.residual.deviance <- calc.deviance(obs=observed, pred=pred_testdata$ensbl, family="bernoulli", calc.mean=TRUE)
+    null.dev =  calc.deviance(observed,rep(mean(observed),length(observed)), family="bernoulli", calc.mean=T)
+    dev=(null.dev - ext.residual.deviance)/null.dev
+    Eval_ensbl[counter,1]<-k
+    Eval_ensbl[counter,2]<-sqrt(mean((pred_testdata$ensbl-observed)^2))#RMSE
+    Eval_ensbl[counter,3]<-dev*100
+    Eval_ensbl[counter,4]<-e@auc
+    Eval_ensbl[counter,5]<-max(e@TPR + e@TNR-1)
+    Eval_ensbl[counter,6]<-cor(pred_testdata$ensbl,observed, method="spearman") #Spearman correlation
+    Eval_ensbl[counter,7] <-sum(pred_testdata$ensbl)/sum(observed)
+    counter=counter+1
+  }
+  write.csv(Eval_gam, file=paste(gamdir, sp, "/", sp,"_",ID, "_5fold.csv", sep=""))
+  write.csv(Eval_brt, file=paste(brtdir, sp, "/", sp,"_",ID, "_5fold.csv", sep=""))
+  write.csv(Eval_ensbl, file=paste(ensbldir, sp, "/", sp,"_",ID, "_5fold.csv", sep=""))
+}
+
+#75/25 evaluation
+ev_7525<-function(sp, df, gbm.x, gbm.y, formula,ID){
+  f75<-floor((nrow(df)/4)*3)
+  df_train<-df[sample(nrow(df),f75),]
+  df_test<-df[sample(nrow(df),nrow(df)-f75),]
+  offset_train=log(df_train$eff_length)
+  offset_test=log(df_test$eff_length)
+  Eval_brt <- as.data.frame(matrix(data=0,nrow=1,ncol=7))
+  colnames(Eval_brt) <- c("x","RMSE","DevianceExplained(%)","AUC","TSS","cor","PredRatio")
+  Eval_gam <- as.data.frame(matrix(data=0,nrow=1,ncol=7))
+  colnames(Eval_gam) <- c("x","AIC","DevianceExplained(%)","AUC","TSS","cor","PredRatio")
+  Eval_ensbl <- as.data.frame(matrix(data=0,nrow=1,ncol=7))
+  colnames(Eval_ensbl) <- c("x","RMSE","DevianceExplained(%)","AUC","TSS","cor","PredRatio")
+  comp_perf<-list()
+  counter=1
+  gam<-mgcv::gam(formula=formula, data=df_train, family=binomial, method="REML")
+  gam_summ<-summary(gam)
+  brt <- gbm.step(data=df_train, gbm.x= gbm.x, gbm.y = gbm.y,offset=offset_train, 
+                  family="bernoulli", tree.complexity=3,
+                  learning.rate = 0.001, bag.fraction = 0.6)
+  pred<-data.frame(predict.gbm(brt, df_test, 
+                               n.trees=brt$gbm.call$best.trees, type="link"))
+  names(pred)<-"brt"
+  pred_testdata <- data.frame(
+    gam = as.vector(predict(gam, df_test, type='response')),
+    brt = 1/(1+exp(-offset_test-pred))
+  )
+  observed <- as_vector(df_test %>% pull(gbm.y))
+  d <- cbind(observed, pred_testdata$gam)
+  pres <- as.numeric(d[d[,1]==1,2])
+  abs <- as.numeric(d[d[,1]==0,2])
+  e <- evaluate(p=pres, a=abs)
+  Eval_gam[counter,1]<-1
+  Eval_gam[counter,2]<-gam$aic
+  Eval_gam[counter,3]<-(gam_summ$dev.expl)*100
+  Eval_gam[counter,4]<-e@auc
+  Eval_gam[counter,5]<-max(e@TPR + e@TNR-1)
+  Eval_gam[counter,6]<-cor(pred_testdata$gam,observed, method="spearman") #Spearman correlation
+  Eval_gam[counter,7] <-sum(pred_testdata$gam)/sum(observed)
+  ext.residual.deviance <- calc.deviance(obs=observed, pred=pred_testdata$brt, family="bernoulli", calc.mean=TRUE)
+  null.dev =  calc.deviance(observed,rep(mean(observed),length(observed)), family="bernoulli", calc.mean=T)
+  dev=(null.dev - ext.residual.deviance)/null.dev 
+  d <- cbind(observed, pred_testdata$brt)
+  pres <- as.numeric(d[d[,1]==1,2])
+  abs <- as.numeric(d[d[,1]==0,2])
+  e <- evaluate(p=pres, a=abs)
+  Eval_brt[counter,1] <- 1
+  Eval_brt[counter,2] <- sqrt(mean((pred_testdata$brt-observed)^2))#RMSE
+  Eval_brt[counter,3] <-dev*100 #External deviance explained
+  Eval_brt[counter,4] <-e@auc #C-index
+  Eval_brt[counter,5] <-max(e@TPR + e@TNR-1)
+  Eval_brt[counter,6] <-cor(pred_testdata$brt,observed, method="spearman") #Spearman correlation
+  Eval_brt[counter,7] <-sum(pred_testdata$brt)/sum(observed) #Ratio of predictions to actual values
+  comp_perf[[counter]]<-data.frame(alg=c("gam","brt"))
+  comp_perf[[counter]]$AUC<-rbind(Eval_gam$AUC,Eval_brt$AUC)
+  row.names(comp_perf[[counter]]) <- comp_perf[[counter]]$alg
+  colnames(comp_perf[[counter]])<-c("alg","AUC")
+  pred_testdata$ensbl <- as.vector(apply(pred_testdata, 1, weighted.mean, w=comp_perf[[counter]][names(pred_testdata),'AUC']))
+  d <- cbind(observed, pred_testdata$ensbl)
+  pres <- as.numeric(d[d[,1]==1,2])
+  abs <- as.numeric(d[d[,1]==0,2])
+  e <- evaluate(p=pres, a=abs)
+  ext.residual.deviance <- calc.deviance(obs=observed, pred=pred_testdata$ensbl, family="bernoulli", calc.mean=TRUE)
+  null.dev =  calc.deviance(observed,rep(mean(observed),length(observed)), family="bernoulli", calc.mean=T)
+  dev=(null.dev - ext.residual.deviance)/null.dev
+  Eval_ensbl[counter,1]<-1
+  Eval_ensbl[counter,2]<-sqrt(mean((pred_testdata$ensbl-observed)^2))#RMSE
+  Eval_ensbl[counter,3]<-dev*100
+  Eval_ensbl[counter,4]<-e@auc
+  Eval_ensbl[counter,5]<-max(e@TPR + e@TNR-1)
+  Eval_ensbl[counter,6]<-cor(pred_testdata$ensbl,observed, method="spearman") #Spearman correlation
+  Eval_ensbl[counter,7] <-sum(pred_testdata$ensbl)/sum(observed)
+  write.csv(Eval_gam, file=paste(gamdir, sp, "/", sp,"_",ID, "_7525.csv", sep=""))
+  write.csv(Eval_brt, file=paste(brtdir, sp, "/", sp,"_",ID, "_7525.csv", sep=""))
+  write.csv(Eval_ensbl, file=paste(ensbldir, sp, "/", sp,"_",ID, "_7525.csv", sep=""))
+}
+
+#Leave one out evaluation
+ev_loo<-function(sp, df, gbm.x, gbm.y, formula,ID){
+  Eval_brt <- as.data.frame(matrix(data=0,nrow=16,ncol=7))
+  colnames(Eval_brt) <- c("year","RMSE","DevianceExplained(%)","AUC","TSS","cor","PredRatio")
+  Eval_gam <- as.data.frame(matrix(data=0,nrow=16,ncol=7))
+  colnames(Eval_gam) <- c("year","AIC","DevianceExplained(%)","AUC","TSS","cor","PredRatio")
+  Eval_ensbl <- as.data.frame(matrix(data=0,nrow=16,ncol=7))
+  colnames(Eval_ensbl) <- c("year","RMSE","DevianceExplained(%)","AUC","TSS","cor","PredRatio")
+  comp_perf<-list()
+  counter=1
+  for (y in unique(df$year)){
+    df_train <- df[df$year!=y,]
+    df_test <- df[df$year==y,]
+    offset_train=log(df_train$eff_length)
+    offset_test=log(df_test$eff_length)
+    print(y)
+    gam<-mgcv::gam(formula=formula, data=df_train, family=binomial, method="REML")
+    gam_summ<-summary(gam)
+    brt <- gbm.step(data=df_train, gbm.x= gbm.x, gbm.y = gbm.y,offset=offset_train, 
+                    family="bernoulli", tree.complexity=3,
+                    learning.rate = 0.001, bag.fraction = 0.6)
+    pred<-data.frame(predict.gbm(brt, df_test, 
+                                 n.trees=brt$gbm.call$best.trees, type="link"))
+    names(pred)<-"brt"
+    pred_testdata <- data.frame(
+      gam = as.vector(predict(gam, df_test, type='response')),
+      brt =  1/(1+exp(-offset_test-pred))
+    )
+    observed <- as_vector(df_test %>% pull(gbm.y))
+    d <- cbind(observed, pred_testdata$gam)
+    pres <- as.numeric(d[d[,1]==1,2])
+    abs <- as.numeric(d[d[,1]==0,2])
+    e <- evaluate(p=pres, a=abs)
+    Eval_gam[counter,1]<-y
+    Eval_gam[counter,2]<-gam$aic
+    Eval_gam[counter,3]<-(gam_summ$dev.expl)*100
+    Eval_gam[counter,4]<-e@auc
+    Eval_gam[counter,5]<-max(e@TPR + e@TNR-1)
+    Eval_gam[counter,6]<-cor(pred_testdata$gam,observed, method="spearman") #Spearman correlation
+    Eval_gam[counter,7] <-sum(pred_testdata$gam)/sum(observed)
+    ext.residual.deviance <- calc.deviance(obs=observed, pred=pred_testdata$brt, family="bernoulli", calc.mean=TRUE)
+    null.dev =  calc.deviance(observed,rep(mean(observed),length(observed)), family="bernoulli", calc.mean=T)
+    dev=(null.dev - ext.residual.deviance)/null.dev 
+    d <- cbind(observed, pred_testdata$brt)
+    pres <- as.numeric(d[d[,1]==1,2])
+    abs <- as.numeric(d[d[,1]==0,2])
+    e <- evaluate(p=pres, a=abs)
+    Eval_brt[counter,1] <- y
+    Eval_brt[counter,2] <- sqrt(mean((pred_testdata$brt-observed)^2))#RMSE
+    Eval_brt[counter,3] <-dev*100 #External deviance explained
+    Eval_brt[counter,4] <-e@auc #C-index
+    Eval_brt[counter,5] <-max(e@TPR + e@TNR-1)
+    Eval_brt[counter,6] <-cor(pred_testdata$brt,observed, method="spearman") #Spearman correlation
+    Eval_brt[counter,7] <-sum(pred_testdata$brt)/sum(observed) #Ratio of predictions to actual values
+    comp_perf[[counter]]<-data.frame(alg=c("gam","brt"))
+    comp_perf[[counter]]$AUC<-rbind(Eval_gam$AUC[counter],Eval_brt$AUC[counter])
+    row.names(comp_perf[[counter]]) <- comp_perf[[counter]]$alg
+    colnames(comp_perf[[counter]])<-c("alg","AUC")
+    pred_testdata$ensbl <- as.vector(apply(pred_testdata, 1, weighted.mean, w=comp_perf[[counter]][names(pred_testdata),'AUC']))
+    d <- cbind(observed, pred_testdata$ensbl)
+    pres <- as.numeric(d[d[,1]==1,2])
+    abs <- as.numeric(d[d[,1]==0,2])
+    e <- evaluate(p=pres, a=abs)
+    ext.residual.deviance <- calc.deviance(obs=observed, pred=pred_testdata$ensbl, family="bernoulli", calc.mean=TRUE)
+    null.dev =  calc.deviance(observed,rep(mean(observed),length(observed)), family="bernoulli", calc.mean=T)
+    dev=(null.dev - ext.residual.deviance)/null.dev
+    Eval_ensbl[counter,1]<-y
+    Eval_ensbl[counter,2]<-sqrt(mean((pred_testdata$ensbl-observed)^2))#RMSE
+    Eval_ensbl[counter,3]<-dev*100
+    Eval_ensbl[counter,4]<-e@auc
+    Eval_ensbl[counter,5]<-max(e@TPR + e@TNR-1)
+    Eval_ensbl[counter,6]<-cor(pred_testdata$ensbl,observed, method="spearman") #Spearman correlation
+    Eval_ensbl[counter,7] <-sum(pred_testdata$ensbl)/sum(observed)
+    counter=counter+1}
+  write.csv(Eval_gam, file=paste(gamdir, sp, "/", sp,"_",ID, "_loo.csv", sep=""))
+  write.csv(Eval_brt, file=paste(brtdir, sp, "/", sp,"_",ID, "_loo.csv", sep=""))
+  write.csv(Eval_ensbl, file=paste(ensbldir, sp, "/", sp,"_",ID, "_loo.csv", sep=""))
+}
+
+#Predict full area with GAM
+pred_maps_gam<-function(df,grid,gam,sp){
+  df<-df
+  grid<-grid
+  gam<-readRDS(paste(gamdir,sp,"/",gam,sep=""))
+  Az<- sf::st_read(paste(shapefile,"Azores.shp"))
+  y<-2003
+  m<-7
+  for (y in unique(grid$year)){
+    grid_year <- grid[grid$year==y,]
+    print(y)
+    for (m in unique(grid_year$month)){
+      grid_month <- grid_year[grid_year$month==m,]
+      print(m)
+      pred<-data.frame((predict(gam,se.fit=T,newdata=grid_month,type="response")))
+      ID<-seq(1:3192)
+      lon<-grid_month$Lng_cntwgs84
+      lat<-grid_month$Lt_cntwgs84
+      sd<-pred$se.fit
+      pred<-pred$fit
+      date<-grid_month$Date
+      pred_map<-as.data.frame(cbind(ID, lon, lat, pred, sd, date))
+      pred_map$date<-as.Date(pred_map$date)
+      r <- rasterFromXYZ(as.data.frame(pred_map)[, c("lon", "lat", "pred")])
+      writeRaster(r, paste(mapsdir,"/",sp,"/","pred_gam_",y,"_",m,".grd",sep=""),overwrite=T)
+      r <- rasterFromXYZ(as.data.frame(pred_map)[, c("lon", "lat", "sd")])
+      writeRaster(r, paste(mapsdir,"/",sp,"/","sd_gam_",y,"_",m,".grd",sep=""),overwrite=T)
+      ggplot()+
+        geom_raster(data=pred_map,aes(lon,lat,fill=pred))+
+        geom_sf(data=Az)+
+        labs(fill=NULL)+
+        scale_fill_fermenter(n.breaks=10,palette="RdYlBu",limits=c(0,1),breaks=c(0.05,0.1,0.15,0.2,0.3,0.4,0.5,0.6,0.7),na.value=NA)+
+        guides(fill=guide_coloursteps(show.limits = T,even.steps = F))+
+        ggtitle(paste(sp,y,m,sep="-"))+
+        xlab("Longitude")+
+        ylab("Latitude")+
+        theme_classic()+
+        theme(legend.text=element_text(size=7),legend.key.height = unit(1.5, "cm"),legend.key.width = unit(0.5, "cm"))
+      ggsave(paste(mapsdir,"/",sp,"/","pred_gam_",y,"_",m,".jpeg",sep=""),plot = last_plot(),width=6.88,height = 4.25)
+      if (m==5){m_pred_df<-pred_map}else{m_pred_df<-rbind(m_pred_df,pred_map)}
+    } 
+    if (y==2001){final_pred_df<-m_pred_df}else{final_pred_df<-rbind(final_pred_df,m_pred_df)}}
+  saveRDS(final_pred_df, paste(gamdir,sp,"/final_pred_df.RDS",sep=""))
+}
+
+#Predict full area BRT
+pred_maps_brt<-function(df,grid,brt,sp){
+  df<-df
+  grid<-grid
+  brt<-readRDS(paste(brtdir,sp,"/",brt,sep=""))
+  Az<- sf::st_read(paste(shapefile,"Azores.shp"))
+  #y<-2001
+  #m<-7
+  for (y in unique(grid$year)){
+    grid_year <- grid[grid$year==y,]
+    print(y)
+    for (m in unique(grid_year$month)){
+      grid_month <- grid_year[grid_year$month==m,]
+      print(m)
+      offset<-log(grid_month$eff_length)
+      pred<-data.frame(predict.gbm(brt, grid_month, 
+                                   n.trees=brt$gbm.call$best.trees, type="link"))
+      pred = 1/(1+exp(-offset - pred))
+      ID<-seq(1:3192)
+      lon<-grid_month$Lng_cntwgs84
+      lat<-grid_month$Lt_cntwgs84
+      names(pred)<-"pred"
+      date<-as.POSIXct(grid_month$Date) 
+      pred_map<-as.data.frame(cbind(ID, lon, lat, pred, date))
+      r <- rasterFromXYZ(as.data.frame(pred_map)[, c("lon", "lat", "pred")])
+      writeRaster(r, paste(mapsdir,"/",sp,"/","pred_brt_",y,"_",m,".grd",sep=""),overwrite=T)
+      ggplot()+
+        geom_raster(data=pred_map,aes(lon,lat,fill=pred))+
+        geom_sf(data=Az)+
+        labs(fill=NULL)+
+        scale_fill_fermenter(n.breaks=10,palette="RdYlBu",limits=c(0,1),breaks=c(0.05,0.1,0.15,0.2,0.3,0.4,0.5,0.6,0.7),na.value=NA)+
+        guides(fill=guide_coloursteps(show.limits = T,even.steps = F))+
+        ggtitle(paste(sp,y,m,sep="-"))+
+        xlab("Longitude")+
+        ylab("Latitude")+
+        theme_classic()+
+        theme(legend.text=element_text(size=7),legend.key.height = unit(1.5, "cm"),legend.key.width = unit(0.5, "cm"))
+      ggsave(paste(mapsdir,"/",sp,"/","pred_brt_",y,"_",m,".jpeg",sep=""),plot = last_plot(),width=6.88,height = 4.25)
+      if (m==5){m_pred_df<-pred_map}else{m_pred_df<-rbind(m_pred_df,pred_map)}
+    } 
+    if (y==2001){final_pred_df<-m_pred_df}else{final_pred_df<-rbind(final_pred_df,m_pred_df)}}
+  saveRDS(final_pred_df, paste(brtdir,sp,"/final_pred_df.RDS",sep=""))
+}
+
+#Built table with GAM and BRT AUC to compute ensemble
+comp_perf_f<-function(sp,kfold){
+  gam_kfold<-read.csv(paste(gamdir,sp,"/",kfold,sep=""))
+  brt_kfold<-read.csv(paste(brtdir,sp,"/",kfold,sep=""))
+  comp_perf<-data.frame(alg=c("gam","brt"))
+  comp_perf$AUC<-rbind(median(gam_kfold$AUC),median(brt_kfold$AUC))
+  row.names(comp_perf) <- comp_perf$alg
+  colnames(comp_perf)<-c("alg","AUC")
+  return(comp_perf)}
+
+#Predict full area Ensemble
+pred_maps_ensbl<-function(df,grid,gam,brt,sp,kfold){
+  df<-df
+  grid<-grid
+  gam<-readRDS(paste(gamdir,sp,"/",gam,sep=""))
+  brt<-readRDS(paste(brtdir,sp,"/",brt,sep=""))
+  comp_perf<-comp_perf_f(sp=sp,kfold=kfold)
+  Az<- sf::st_read(paste(shapefile,"Azores.shp"))
+  #y<-2001
+  #m<-5
+  for (y in unique(grid$year)){
+    grid_year <- grid[grid$year==y,]
+    print(y)
+    for (m in unique(grid_year$month)){
+      grid_month <- grid_year[grid_year$month==m,]
+      offset=log(grid_month$eff_length)
+      print(m)
+      pred<-data.frame(predict.gbm(brt, grid_month, 
+                                   n.trees=brt$gbm.call$best.trees, type="link"))
+      names(pred)<-"brt"
+      pred_testdata <- data.frame(
+        gam = as.vector(predict(gam, grid_month, type='response')),
+        brt = 1/(1+exp(-offset-pred)))
+      pred <- as.vector(apply(pred_testdata, 1, weighted.mean, w=comp_perf[names(pred_testdata),'AUC']))
+      ID<-seq(1:3192)
+      lon<-grid_month$Lng_cntwgs84
+      lat<-grid_month$Lt_cntwgs84
+      names(pred)<-"pred"
+      date<-as.POSIXct(grid_month$Date) 
+      pred_map<-as.data.frame(cbind(ID, lon, lat, pred, date))
+      r <- rasterFromXYZ(as.data.frame(pred_map)[, c("lon", "lat", "pred")])
+      writeRaster(r, paste(mapsdir,"/",sp,"/","pred_ensbl_",y,"_",m,".grd",sep=""),overwrite=T)
+      ggplot()+
+        geom_raster(data=pred_map,aes(lon,lat,fill=pred))+
+        geom_sf(data=Az)+
+        labs(fill=NULL)+
+        scale_fill_fermenter(n.breaks=10,palette="RdYlBu",limits=c(0,1),breaks=c(0.05,0.1,0.15,0.2,0.3,0.4,0.5,0.6,0.7),na.value=NA)+
+        guides(fill=guide_coloursteps(show.limits = T,even.steps = F))+
+        ggtitle(paste(sp,y,m,sep="-"))+
+        xlab("Longitude")+
+        ylab("Latitude")+
+        theme_classic()+
+        theme(legend.text=element_text(size=7),legend.key.height = unit(1.5, "cm"),legend.key.width = unit(0.5, "cm"))
+      ggsave(paste(mapsdir,"/",sp,"/","pred_ensbl_",y,"_",m,".jpeg",sep=""),plot = last_plot(),width=6.88,height = 4.25)
+      if (m==5){m_pred_df<-pred_map}else{m_pred_df<-rbind(m_pred_df,pred_map)}
+    } 
+    if (y==2001){final_pred_df<-m_pred_df}else{final_pred_df<-rbind(final_pred_df,m_pred_df)}}
+  saveRDS(final_pred_df, paste(ensbldir,sp,"/final_pred_df.RDS",sep=""))
+}
+
+#####DDE models####
+
+##1) GAM----
+formula=dde_presence ~ s(code_obs,bs="re",by=dum)+s(code_boat,bs="re",by=dum)+
+  s(sst,by=month_f,k=5)+s(log(chl),k=5)+s(log(chl_2m),k=5)+s(depth,k=4)+slope+
+  sqrt(dist_200m)+sqrt(mnkc_hmlmeso)+s(grad_hmlmeso,k=6)+grad_ek_L1+offset(log(eff_length))
+
+gam_dde<-mgcv::gam(formula=formula, family=binomial, data=df, method="REML")
+summary(gam_dde)
+AIC(gam_dde)
+
+saveRDS(gam_dde, paste(gamdir,"dde/gam.RDS",sep=""))
+
+#Partial response plots
+var.name<-c("code_obs","code_boat","SST:May","SST:June","SST:July","SST:August","SST:September","log(CHL)","log(CHL_2m)","Depth","grad_hmlmeso","slope","sqrt(dist_200m)","sqrt(mnkc_hmlmeso)","grad_EKE_L1")
+sp="dde"
+i<-13
+for(i in 3:15){
+  jpeg(file=paste(plotdir,"/",sp,"/","gam_",i,".jpeg",sep=""), width=650, height = 528, units="px")
+  plot(gam_dde,select=i,scale=0,all.terms=T,rug=T,shade=T,shade.col="gray90",ylabs="",xlabs=var.name[i],main="",cex.lab=2,cex.axis=2)
+  abline(h=0,col="black",lwd=1.5,lty=5)
+  dev.off()}
+
+#Importance of the variables
+e<-bm_VariablesImportance(bm.model = gam_dde,
+                          expl.var = df[, c('month_f','eff_length','code_obs','code_boat','sst', 'chl','chl_2m','depth','slope','dist_200m','mnkc_hmlmeso','grad_hmlmeso','grad_ek_L1','dum')],
+                          method = "full_rand",
+                          nb.rep=1)
+e<-e[e$expl.var!="dum",]
+e<-e[e$expl.var!="code_obs",]
+e<-e[e$expl.var!="code_boat",]
+e<-e[e$expl.var!="eff_length",]
+e$norm.imp<-(e$var.imp/sum(e$var.imp))*100
+
+e.gam.dde.pl<-e
+e.gam.dde.pl[e.gam.dde.pl$expl.var=="sst",]$norm.imp<-e[e$expl.var=="sst",]$norm.imp+e[e$expl.var=="month_f",]$norm.imp
+e.gam.dde.pl[e.gam.dde.pl$expl.var=="month_f",]$expl.var<-"month"
+e.gam.dde.pl[e.gam.dde.pl$expl.var=="month",]$norm.imp<-0
+e.gam.dde.pl[e.gam.dde.pl$expl.var=="sst",]$expl.var<-"SST"
+e.gam.dde.pl[e.gam.dde.pl$expl.var=="chl",]$expl.var<-"CHL"
+e.gam.dde.pl[e.gam.dde.pl$expl.var=="chl_2m",]$expl.var<-"CHL_2m"
+e.gam.dde.pl[e.gam.dde.pl$expl.var=="grad_ek_L1",]$expl.var<-"grad_EKE_L1"
+e.gam.dde.pl$rand<-NULL
+e.gam.dde.pl$var.imp<-NULL
+e.gam.dde.pl$model<-"GAM"
+e.gam.dde.pl$sp<-"DDE"
+e.gam.dde.pl[14,]<-"other"
+e.gam.dde.pl$norm.imp<-as.numeric(e.gam.dde.pl$norm.imp)
+e.gam.dde.pl[e.gam.dde.pl$expl.var=="other",]$norm.imp<-0
+e.gam.dde.pl[e.gam.dde.pl$expl.var=="other",]$norm.imp<-e.gam.dde.pl[e.gam.dde.pl$expl.var=="depth",]$norm.imp+
+  e.gam.dde.pl[e.gam.dde.pl$expl.var=="slope",]$norm.imp+
+  e.gam.dde.pl[e.gam.dde.pl$expl.var=="mnkc_hmlmeso",]$norm.imp+
+  e.gam.dde.pl[e.gam.dde.pl$expl.var=="grad_EKE_L1",]$norm.imp
+
+e.gam.dde.pl<-e.gam.dde.pl[e.gam.dde.pl$expl.var!="depth",]
+e.gam.dde.pl<-e.gam.dde.pl[e.gam.dde.pl$expl.var!="slope",]
+e.gam.dde.pl<-e.gam.dde.pl[e.gam.dde.pl$expl.var!="mnkc_hmlmeso",]
+e.gam.dde.pl<-e.gam.dde.pl[e.gam.dde.pl$expl.var!="grad_EKE_L1",]
+
+sum<-e.gam.dde.pl[e.gam.dde.pl$expl.var=="CHL",]$norm.imp+e.gam.dde.pl[e.gam.dde.pl$expl.var=="CHL_2m",]$norm.imp+e.gam.dde.pl[e.gam.dde.pl$expl.var=="SST",]$norm.imp
+
+e.pl %>%
+  mutate(expl.var = fct_reorder(expl.var, norm.imp)) %>%
+  ggplot(aes(norm.imp,expl.var))+
+  geom_bar(stat="identity",width = 0.7)+
+  labs(x="Relative importance (%)", y="Predictors")+
+  xlim(0,100)+
+  theme_bw()+
+  theme(axis.text = element_text(size=10))
+ggsave("dde_gam_relimp.jpeg",plot = last_plot(),path=plotdir,width = 1400, height = 904,units = "px")
+
+#DHARMa tests
+simulationOutput<-simulateResiduals(gam, plot=T)
+
+#gruop by random var
+res2 <- recalculateResiduals(simulationOutput, group = rep(1:50, each = 10))
+#group by random effects: code_obs and code_boat
+res3 <- recalculateResiduals(simulationOutput, group = df$code_obs)
+res4 <- recalculateResiduals(simulationOutput, group = df$code_boat)
+#group by temporal var: year and month
+year<-as.factor(df$year)
+month<-as.factor(df$month)
+res5 <- recalculateResiduals(simulationOutput, group = year)
+res6 <- recalculateResiduals(simulationOutput, group = month)
+#group by sst
+x = df$sst
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res7 <- recalculateResiduals(simulationOutput, group = grouping)
+#group by chl_2m
+x = df$chl_2m
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res8 <- recalculateResiduals(simulationOutput, group = grouping)
+
+plot(res8)
+
+plotResiduals(simulationOutput, df$year_f)
+
+##2) BRT----
+offset=log(df$eff_length)
+
+#BRT all var (same as included in gam)
+#Run 10 times to select best model
+Evaluations<-as.data.frame(matrix(data=0,nrow=10,ncol=7))
+colnames(Evaluations) <- c("run","RMSE","Cor","C-index","PredRatio","DevianceExplained(%)","PseudoR2")
+summ<-list()
+run<-1
+gbm.y = 13
+for(i in 1:10){
+  print(run)
+  brt<-gbm.step(data=df, gbm.x=c(15:18,20,22:23,27:30,35,37), gbm.y = 13,offset=offset,
+                family="bernoulli", tree.complexity=3,
+                learning.rate = 0.01, bag.fraction = 0.6)
+  summ[[i]]<-summary(brt)
+  preds <- predict.gbm(brt, df,n.trees=brt$gbm.call$best.trees, type="link")
+  preds<-1/(1+exp(-offset-preds))
+  observed <- as_vector(df %>% pull(gbm.y))
+  ext.residual.deviance <- calc.deviance(obs=observed, pred=preds, family="bernoulli", calc.mean=TRUE)
+  null.dev =  calc.deviance(observed,rep(mean(observed),length(observed)), family="bernoulli", calc.mean=T)
+  dev=(null.dev - ext.residual.deviance)/null.dev 
+  Rsquared <- pseudoR2.BRT(brt)
+  Evaluations[run,1]<- run
+  Evaluations[run,2]<-sqrt(mean((preds-observed)^2))#RMSE
+  Evaluations[run,3]<-cor(preds,observed, method="spearman") #Spearman correlation
+  Evaluations[run,4]<-rcorr.cens(preds,observed)[1] #C-index
+  Evaluations[run,5]<-sum(preds)/sum(observed) #Ratio of predictions to actual values
+  Evaluations[run,6]<-dev*100 #External deviance explained
+  Evaluations[run,7]<-Rsquared #Pseudo-R2 from BRT
+  run=run+1
+}
+
+#Final BRT for DDE
+brt_dde<-gbm.step(data=df, gbm.x=c(15:18,20,22:23,27:30,35), gbm.y = 13,offset=offset, 
+              family="bernoulli", tree.complexity=3,learning.rate = 0.01, bag.fraction = 0.6)
+summary(brt_dde)
+
+saveRDS(brt_dde, paste(brtdir,"dde/brt.RDS",sep=""))
+
+#Partial response plots
+sp="dde"
+var.name<-c("SST","CHL","CHL_2m","depth","dist_200m","mnkc_epi","mnkc_hmlmeso","grad_CHL","grad_CHL_2m","grad_hmlmeso","grad_EKE_L1","month")
+for(i in 1:11){
+  jpeg(file=paste(plotdir,"/",sp,"/","brt_",i,".jpeg",sep=""), width=650, height = 528, units="px")
+  gbm.plot(brt_dde, variable.no=i,plot.layout=c(1,1),rug=F,common.scale = F, write.title=T,show.contrib=F,y.label="",x.label=var.name[i],cex.lab=2,cex.axis=2,lwd=1.5,abline(h=0,col="black",lwd=1,lty=5))
+  dev.off()}
+
+#Importance of the variables
+e<-bm_VariablesImportance(bm.model = brt_dde,
+                          expl.var = df[, c('month_f','sst', 'chl','chl_2m','depth','dist_200m','mnkc_epi','mnkc_hmlmeso','grad_chl','grad_chl_2m','grad_hmlmeso','grad_ek_L1')],
+                          method = "full_rand",
+                          nb.rep=1)
+
+e$norm.imp<-(e$var.imp/sum(e$var.imp))*100
+
+e.brt.dde.pl<-e
+e.brt.dde.pl[e.brt.dde.pl$expl.var=="month_f",]$expl.var<-"month"
+e.brt.dde.pl[e.brt.dde.pl$expl.var=="sst",]$expl.var<-"SST"
+e.brt.dde.pl[e.brt.dde.pl$expl.var=="chl",]$expl.var<-"CHL"
+e.brt.dde.pl[e.brt.dde.pl$expl.var=="chl_2m",]$expl.var<-"CHL_2m"
+e.brt.dde.pl[e.brt.dde.pl$expl.var=="grad_chl",]$expl.var<-"grad_CHL"
+e.brt.dde.pl[e.brt.dde.pl$expl.var=="grad_chl_2m",]$expl.var<-"grad_CHL_2m"
+e.brt.dde.pl[e.brt.dde.pl$expl.var=="grad_ek_L1",]$expl.var<-"grad_EKE_L1"
+e.brt.dde.pl$rand<-NULL
+e.brt.dde.pl$var.imp<-NULL
+e.brt.dde.pl$model<-"BRT"
+e.brt.dde.pl$sp<-"DDE"
+e.brt.dde.pl[13,]<-"other"
+e.brt.dde.pl[e.brt.dde.pl$expl.var=="other",]$norm.imp<-0
+e.brt.dde.pl$norm.imp<-as.numeric(e.brt.dde.pl$norm.imp)
+e.brt.dde.pl[e.brt.dde.pl$expl.var=="other",]$norm.imp<-e.brt.dde.pl[e.brt.dde.pl$expl.var=="depth",]$norm.imp+
+  e.brt.dde.pl[e.brt.dde.pl$expl.var=="mnkc_epi",]$norm.imp+
+  e.brt.dde.pl[e.brt.dde.pl$expl.var=="mnkc_hmlmeso",]$norm.imp+
+  e.brt.dde.pl[e.brt.dde.pl$expl.var=="grad_CHL",]$norm.imp+
+  e.brt.dde.pl[e.brt.dde.pl$expl.var=="grad_CHL_2m",]$norm.imp+
+  e.brt.dde.pl[e.brt.dde.pl$expl.var=="grad_EKE_L1",]$norm.imp
+
+e.brt.dde.pl<-e.brt.dde.pl[e.brt.dde.pl$expl.var!="depth",]
+e.brt.dde.pl<-e.brt.dde.pl[e.brt.dde.pl$expl.var!="mnkc_epi",]
+e.brt.dde.pl<-e.brt.dde.pl[e.brt.dde.pl$expl.var!="mnkc_hmlmeso",]
+e.brt.dde.pl<-e.brt.dde.pl[e.brt.dde.pl$expl.var!="grad_CHL",]
+e.brt.dde.pl<-e.brt.dde.pl[e.brt.dde.pl$expl.var!="grad_CHL_2m",]
+e.brt.dde.pl<-e.brt.dde.pl[e.brt.dde.pl$expl.var!="grad_EKE_L1",]
+
+sum<-e.brt.dde.pl[e.brt.dde.pl$expl.var=="CHL",]$norm.imp+e.brt.dde.pl[e.brt.dde.pl$expl.var=="CHL_2m",]$norm.imp+e.brt.dde.pl[e.brt.dde.pl$expl.var=="SST",]$norm.imp
+
+e.pl %>%
+  mutate(expl.var = fct_reorder(expl.var, norm.imp)) %>%
+  ggplot(aes(norm.imp,expl.var))+
+  geom_bar(stat="identity",width=0.7)+
+  labs(x="Relative importance (%)", y="Predictors")+
+  xlim(0,100)+
+  theme_bw()+
+  theme(axis.text=element_text(size=10))
+ggsave("dde_brt_relimp.jpeg",plot = last_plot(),path=plotdir,width = 1400, height = 904,units = "px")
+
+##3) Ensemble----
+#Load best GAM and BRT
+gam<-readRDS(paste(gamdir,"dde/gam.RDS",sep=""))
+brt<-readRDS(paste(brtdir,"dde/brt.RDS",sep=""))
+
+pred_testdata <- data.frame(
+  gam = as.vector(predict(gam, df, type='response')),
+  brt = predict.gbm(brt, df, n.trees=brt$gbm.call$best.trees, type="response")
+)
+
+summary(pred_testdata)
+comp_perf<-comp_perf_f(sp="dde",kfold="dde_kfold.csv")
+
+# Weighted mean of probabilities, weighted by AUC 
+# (Make sure that order of models is the same in df for predictions and performance!!)
+wmean_prob <- as.vector(apply(pred_testdata, 1, weighted.mean, w=comp_perf[names(pred_testdata),'AUC_kfold']))
+
+pred_testdata$ensbl<-wmean_prob
+
+observed <- as_vector(df$dde_presence)
+AUC<-rcorr.cens(pred_testdata$ensbl,observed)[1]
+
+##4) Model Evaluation----
+formula=dde_presence ~ s(code_obs,bs="re",by=dum)+s(code_boat,bs="re",by=dum)+
+  s(sst,by=month_f,k=5)+s(log(chl),k=5)+s(log(chl_2m),k=5)+s(depth,k=4)+slope+
+  sqrt(dist_200m)+sqrt(mnkc_hmlmeso)+s(grad_hmlmeso,k=6)+grad_ek_L1+offset(log(eff_length))
+gbm.x=c(15:18,20,22:23,27:30,35)
+gbm.y=13
+
+ev_7525(sp="dde",df,gbm.x,gbm.y,formula,ID="final")
+ev_kfold(sp="dde",df,gbm.x,gbm.y,formula,ID="final")
+ev_loo(sp="dde",df,gbm.x,gbm.y,formula,ID="final")
+
+##5) Predict for grid all months 2001-2015----
+pred_maps_gam(df=df, grid=grid,gam="gam.RDS",sp="dde")
+pred_maps_brt(df,grid,brt="brt.RDS",sp="dde")
+pred_maps_ensbl(df,grid,gam="gam.RDS",brt="brt.RDS",sp="dde",kfold="dde_final_5fold.csv")
+
+
+
+#####SFR models####
+
+##1) GAM----
+formula=sfr_presence ~ s(code_obs,bs="re",by=dum)+s(code_boat,bs="re",by=dum)+
+  s(sst,by=month_f)+log(chl_2m)+grad_sst+s(grad_chl)+offset(log(eff_length))
+
+gam_sfr<-mgcv::gam(formula=formula, family=binomial, data=df, method="REML")
+summary(gam_sfr)
+AIC(gam_sfr)
+
+saveRDS(gam_sfr, paste(gamdir,"sfr/gam.RDS",sep=""))
+
+#Partial response plots
+var.name<-c("code_obs","code_boat","SST:May","SST:June","SST:July","SST:August","SST:September","grad_CHL","log(CHL_2m)","grad_SST")
+sp="sfr"
+i<-10
+for(i in 3:10){
+  jpeg(file=paste(plotdir,"/",sp,"/","gam_",i,".jpeg",sep=""), width=650, height = 528, units="px")
+  plot(gam_sfr,select=i,scale=0, all.terms=T,rug=T,shade=T,shade.col="gray90",ylabs="",xlabs=var.name[i],main="",cex.lab=2,cex.axis=2)
+  abline(h=0,col="black",lwd=1.5,lty=5)
+  dev.off()}
+
+#Importance of the variables
+e<-bm_VariablesImportance(bm.model = gam_sfr,
+                          expl.var = df[, c('month_f','eff_length','code_obs','code_boat','sst','chl_2m','grad_sst','grad_chl','dum')],
+                          method = "full_rand",
+                          nb.rep=1)
+e<-e[e$expl.var!="code_boat",]
+e<-e[e$expl.var!="code_obs",]
+e<-e[e$expl.var!="dum",]
+e<-e[e$expl.var!="eff_length",]
+e$norm.imp<-(e$var.imp/sum(e$var.imp))*100
+
+e.gam.sfr.pl<-e
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="sst",]$norm.imp<-e[e$expl.var=="sst",]$norm.imp+e[e$expl.var=="month_f",]$norm.imp
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="month_f",]$expl.var<-"month"
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="month",]$norm.imp<-0
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="sst",]$expl.var<-"SST"
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="chl_2m",]$expl.var<-"CHL_2m"
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="grad_sst",]$expl.var<-"grad_SST"
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="grad_chl",]$expl.var<-"grad_CHL"
+e.gam.sfr.pl$rand<-NULL
+e.gam.sfr.pl$var.imp<-NULL
+e.gam.sfr.pl$model<-"GAM"
+e.gam.sfr.pl$sp<-"SFR"
+e.gam.sfr.pl[9,]<-"other"
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="other",]$norm.imp<-0
+e.gam.sfr.pl$norm.imp<-as.numeric(e.gam.sfr.pl$norm.imp)
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="other",]$norm.imp<-e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="grad_SST",]$norm.imp+
+  e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="grad_CHL",]$norm.imp
+
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="grad_SST",]$expl.var<-"dist_200"
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="grad_CHL",]$expl.var<-"grad_hmlmeso"
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="dist_200",]$norm.imp<-0
+e.gam.sfr.pl[e.gam.sfr.pl$expl.var=="grad_hmlmeso",]$norm.imp<-0
+
+e.gam.sfr.pl[10,]<-c("CHL",0,"GAM","SFR")
+
+sum<-e.pl[e.pl$expl.var=="chl",]$norm.imp+e.pl[e.pl$expl.var=="chl_2m",]$norm.imp+e.pl[e.pl$expl.var=="sst",]$norm.imp
+
+e.pl %>%
+  mutate(expl.var = fct_reorder(expl.var, norm.imp)) %>%
+  ggplot(aes(norm.imp,expl.var))+
+  geom_bar(stat="identity", width = 0.7)+
+  labs(x="Relative importance (%)", y="Predictors")+
+  xlim(0,100)+
+  theme_bw()+
+  theme(axis.text = element_text(size=10))
+ggsave("sfr_gam_relimp.jpeg",plot = last_plot(),path=plotdir,width = 1400, height = 904,units = "px")
+
+#DHARMa tests
+simulationOutput<-simulateResiduals(gam, plot=T)
+
+#gruop by random var
+res2 <- recalculateResiduals(simulationOutput, group = rep(1:50, each = 10))
+#group by random effects: code_obs and code_boat
+res3 <- recalculateResiduals(simulationOutput, group = df$code_obs)
+res4 <- recalculateResiduals(simulationOutput, group = df$code_boat)
+#group by temporal var: year and month
+year<-as.factor(df$year)
+month<-as.factor(df$month)
+res5 <- recalculateResiduals(simulationOutput, group = year)
+res6 <- recalculateResiduals(simulationOutput, group = month)
+#group by sst
+x = df$sst
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res7 <- recalculateResiduals(simulationOutput, group = grouping)
+#group by chl_2m
+x = df$chl_2m
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res8 <- recalculateResiduals(simulationOutput, group = grouping)
+
+plot(res8)
+
+plotResiduals(simulationOutput, df$year_f)
+
+##2) BRT----
+offset=log(df$eff_length)
+
+#BRT all var (same as included in gam)
+#Run 10 times to select best model
+Evaluations<-as.data.frame(matrix(data=0,nrow=10,ncol=7))
+colnames(Evaluations) <- c("run","RMSE","Cor","C-index","PredRatio","DevianceExplained(%)","PseudoR2")
+summ<-list()
+run<-1
+gbm.y=14
+for(i in 1:10){
+  print(run)
+  brt<-gbm.step(data=df, gbm.x=c(15:17,20,22:23,27,35,37), gbm.y = 14, offset=offset,
+                family="bernoulli", tree.complexity=3,
+                learning.rate = 0.01, bag.fraction = 0.6)
+  summ[[i]]<-summary(brt)
+  preds <- predict.gbm(brt, df,n.trees=brt$gbm.call$best.trees, type="link")
+  preds = 1/(1+exp(-offset - preds))
+  observed <- as.vector(df %>% pull(gbm.y))
+  ext.residual.deviance <- calc.deviance(obs=observed, pred=preds, family="bernoulli", calc.mean=TRUE)
+  null.dev =  calc.deviance(observed,rep(mean(observed),length(observed)), family="bernoulli", calc.mean=T)
+  dev=(null.dev - ext.residual.deviance)/null.dev 
+  Rsquared <- pseudoR2.BRT(brt)
+  Evaluations[run,1]<- run
+  Evaluations[run,2]<-sqrt(mean((preds-observed)^2))#RMSE
+  Evaluations[run,3]<-cor(preds,observed, method="spearman") #Spearman correlation
+  Evaluations[run,4]<-rcorr.cens(preds,observed)[1] #C-index
+  Evaluations[run,5]<-sum(preds)/sum(observed) #Ratio of predictions to actual values
+  Evaluations[run,6]<-dev*100 #External deviance explained
+  Evaluations[run,7]<-Rsquared #Pseudo-R2 from BRT
+  run=run+1
+}
+
+#Final BRT model for SFR
+brt_sfr<-gbm.step(data=df, gbm.x=c(15:17,20,22:23,35), gbm.y = 14, offset=offset, family="bernoulli", tree.complexity=3,
+              learning.rate = 0.01, bag.fraction = 0.6)
+
+summary(brt_sfr)
+
+saveRDS(brt_sfr, paste(brtdir,"sfr/brt.RDS",sep=""))
+
+#Partial response plots
+var.name<-c("SST","CHL","CHL_2m","dist_200m","mnkc_epi","mnkc_hmlmeso","month")
+sp="sfr"
+for(i in 1:8){
+  jpeg(file=paste(plotdir,"/",sp,"/","brt_",i,".jpeg",sep=""), width=650, height = 528, units="px")
+  gbm.plot(brt, variable.no=i,plot.layout=c(1,1),rug=F,common.scale = F, write.title=T,show.contrib=F,y.label="",x.label=var.name[i],cex.lab=2,cex.axis=2,lwd=1.5,abline(h=0,col="black",lwd=1,lty=5))
+  dev.off()}
+
+
+#Importance of the variables
+e<-bm_VariablesImportance(bm.model = brt_sfr,
+                          expl.var = df[, c('month_f','sst', 'chl','chl_2m','dist_200m','mnkc_epi','mnkc_hmlmeso')],
+                          method = "full_rand",
+                          nb.rep=1)
+
+e$norm.imp<-(e$var.imp/sum(e$var.imp))*100
+
+e.brt.sfr.pl<-e
+e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="month_f",]$expl.var<-"month"
+e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="sst",]$expl.var<-"SST"
+e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="chl",]$expl.var<-"CHL"
+e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="chl_2m",]$expl.var<-"CHL_2m"
+e.brt.sfr.pl$rand<-NULL
+e.brt.sfr.pl$var.imp<-NULL
+e.brt.sfr.pl$model<-"BRT"
+e.brt.sfr.pl$sp<-"SFR"
+e.brt.sfr.pl[8,]<-"other"
+e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="other",]$norm.imp<-0
+e.brt.sfr.pl$norm.imp<-as.numeric(e.brt.sfr.pl$norm.imp)
+e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="other",]$norm.imp<-e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="mnkc_epi",]$norm.imp+
+  e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="mnkc_hmlmeso",]$norm.imp
+
+e.brt.sfr.pl<-e.brt.sfr.pl[e.brt.sfr.pl$expl.var!="mnkc_epi",]
+
+e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="mnkc_hmlmeso",]$expl.var<-"grad_hmlmeso"
+e.brt.sfr.pl[e.brt.sfr.pl$expl.var=="grad_hmlmeso",]$norm.imp<-0
+
+
+e.pl %>%
+  mutate(expl.var = fct_reorder(expl.var, norm.imp)) %>%
+  ggplot(aes(norm.imp,expl.var))+
+  geom_bar(stat="identity",width=0.7)+
+  labs(x="Relative importance (%)", y="Predictors")+
+  xlim(0,100)+
+  theme_bw()+
+  theme(axis.text = element_text(size=10))
+ggsave("sfr_brt_relimp.jpeg",plot = last_plot(),path=plotdir,width = 1400, height = 904,units = "px")
+
+##3) Ensemble----
+#Load best GAm and BRT models for SFR
+gam<-readRDS(paste(gamdir,"sfr/gam.RDS",sep=""))
+brt<-readRDS(paste(brtdir,"sfr/brt.RDS",sep=""))
+
+pred_testdata <- data.frame(
+  gam = as.vector(predict(gam, df, type='response')),
+  brt = predict.gbm(brt, df, n.trees=brt$gbm.call$best.trees, type="response")
+)
+
+summary(pred_testdata)
+comp_perf<-comp_perf_f(sp="sfr",kfold="sfr_kfold.csv")
+
+# Weighted mean of probabilities, weighted by AUC 
+# (Make sure that order of models is the same in df for predictions and performance!!)
+wmean_prob <- as.vector(apply(pred_testdata, 1, weighted.mean, w=comp_perf[names(pred_testdata),'AUC_kfold']))
+
+pred_testdata$ensbl<-wmean_prob
+
+observed <- as_vector(df$sfr_presence)
+AUC<-rcorr.cens(pred_testdata$ensbl,observed)[1]
+
+##4) Model Evaluation----
+formula=sfr_presence ~ s(code_obs,bs="re",by=dum)+s(code_boat,bs="re",by=dum)+s(sst,by=month_f)+
+  log(chl_2m)+grad_sst+s(grad_chl)+offset(log(eff_length))
+gbm.x=c(15:17,20,22:23,35)
+gbm.y=14
+
+ev_7525(sp="sfr",df,gbm.x,gbm.y,formula,ID="final")  
+ev_kfold(sp="sfr",df,gbm.x,gbm.y,formula,ID="final")
+ev_loo(sp="sfr",df,gbm.x,gbm.y,formula,ID="final")
+
+##5) Predict for grid all months 2001-2015----
+pred_maps_gam(df=df, grid=grid,gam="gam.RDS",sp="dde")
+pred_maps_brt(df,grid,brt="brt.RDS",sp="dde")
+pred_maps_ensbl(df,grid,gam="gam.RDS",brt="brt.RDS",sp="dde",kfold="dde_final_5fold.csv")
