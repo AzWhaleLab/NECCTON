@@ -1,1 +1,254 @@
 
+#################################################################################################
+
+####Compute monthly average predictions + SD and create plots####################################
+
+#### Created by Maria Inês Pinheiro da Silva and supervised by Sergi Pérez-Jorge ################
+
+############################## Date: 22  May 2025 ###############################################
+
+#################################################################################################
+
+# Set working directories
+models="path to store data for models"
+
+brtdir=paste(models,"/Brt outputs/", sep="")
+gamdir=paste(models,"/gam outputs/", sep="")
+ensbldir=paste(models,"/ensbl outputs/", sep="")
+plotdir=paste(models,"/plots/", sep="")
+mapsdir=paste0(models, "/maps/", sep="")
+
+#####Load final predictions for both species####
+gam_pred_dde<-readRDS(paste(gamdir,"dde/final_pred_df.RDS",sep=""))
+gam_pred_sfr<-readRDS(paste(gamdir,"sfr/final_pred_df.RDS",sep=""))
+brt_pred_dde<-readRDS(paste(brtdir,"dde/final_pred_df.RDS",sep=""))
+brt_pred_sfr<-readRDS(paste(brtdir,"sfr/final_pred_df.RDS",sep=""))
+ensbl_pred_dde<-readRDS(paste(ensbldir,"dde/final_pred_df.RDS",sep=""))
+ensbl_pred_sfr<-readRDS(paste(ensbldir,"sfr/final_pred_df.RDS",sep=""))
+
+
+####Prepare combined dataframe####
+final_pred_df<-data.frame(ID=gam_pred_dde$ID,
+                          lon=gam_pred_dde$lon,
+                          lat=gam_pred_dde$lat,
+                          date=gam_pred_dde$date,
+                          dde_gam_pred=gam_pred_dde$pred,
+                          dde_brt_pred=brt_pred_dde$pred,
+                          dde_ensbl_pred=ensbl_pred_dde$pred,
+                          sfr_gam_pred=gam_pred_sfr$pred,
+                          sfr_brt_pred=brt_pred_sfr$pred,
+                          sfr_ensbl_pred=ensbl_pred_sfr$pred)
+
+final_pred_df$date<-as.POSIXct(final_pred_df$date, tz="Europe/London")
+final_pred_df$date<-as.character(final_pred_df$date)
+final_pred_df$date<-as.Date(final_pred_df$date)
+
+final_pred_df$year<-year(final_pred_df$date)
+final_pred_df$month<-month(final_pred_df$date)
+
+#####Compute monthly average####
+#select only one "grid" to create template df
+pred<-final_pred_df[final_pred_df$year==2001 & final_pred_df$month==5,]
+avMonthPred<-data.frame(ID=pred$ID,
+                        lon=pred$lon,
+                        lat=pred$lat)
+
+#Calculate average GAM
+for (m in unique(final_pred_df$month)){
+  pred_m<-final_pred_df[final_pred_df$month==m,]
+  avMonthPred$month<-m
+  for(i in unique(pred_m$ID)){
+    pred_m_ID<-pred_m[pred_m$ID==i,]
+    avMonthPred$mean_pred_dde[i]<-mean(pred_m_ID$dde_gam_pred,na.rm=T)
+    avMonthPred$mean_pred_sfr[i]<-mean(pred_m_ID$sfr_gam_pred,na.rm=T)} 
+  if (m==5){avMonthPred_f<-avMonthPred} else {avMonthPred_f<-rbind(avMonthPred_f,avMonthPred)}
+}
+
+avMonthPred_gam<-avMonthPred_f
+avMonthPred_gam$model<-"GAM"
+
+#Calculate average BRT
+for (m in unique(final_pred_df$month)){
+  pred_m<-final_pred_df[final_pred_df$month==m,]
+  avMonthPred$month<-m
+  for(i in unique(pred_m$ID)){
+    pred_m_ID<-pred_m[pred_m$ID==i,]
+    avMonthPred$mean_pred_dde[i]<-mean(pred_m_ID$dde_brt_pred,na.rm=T)
+    avMonthPred$mean_pred_sfr[i]<-mean(pred_m_ID$sfr_brt_pred,na.rm=T)} 
+  if (m==5){avMonthPred_f<-avMonthPred} else {avMonthPred_f<-rbind(avMonthPred_f,avMonthPred)}
+}
+
+avMonthPred_brt<-avMonthPred_f
+avMonthPred_brt$model<-"BRT"
+
+#Calculate average Ensemble
+for (m in unique(final_pred_df$month)){
+  pred_m<-final_pred_df[final_pred_df$month==m,]
+  avMonthPred$month<-m
+  for(i in unique(pred_m$ID)){
+    pred_m_ID<-pred_m[pred_m$ID==i,]
+    avMonthPred$mean_pred_dde[i]<-mean(pred_m_ID$dde_ensbl_pred,na.rm=T)
+    avMonthPred$mean_pred_sfr[i]<-mean(pred_m_ID$sfr_ensbl_pred,na.rm=T)} 
+  if (m==5){avMonthPred_f<-avMonthPred} else {avMonthPred_f<-rbind(avMonthPred_f,avMonthPred)}
+}
+
+avMonthPred_ensb<-avMonthPred_f
+avMonthPred_ensb$model<-"Ensemble"
+
+#Create empty grid to plot sightings
+avMonthPred_NA<-avMonthPred_f
+avMonthPred_NA$mean_pred_dde<-NA
+avMonthPred_NA$mean_pred_sfr<-NA
+avMonthPred_NA$model<-"Sightings"
+
+#Join all average predictions
+avMonthPred<-rbind(avMonthPred_gam,avMonthPred_brt,avMonthPred_ensb,avMonthPred_NA)
+
+#Plot average monthly predictions for GAM, BRt and Ensemble + sightings in the same frame----
+month.names<-c(
+  '5'="May",
+  '6'="Jun",
+  '7'="Jul",
+  '8'="Aug",
+  '9'="Sep"
+)
+
+#Prepare DDE sightings and plot
+sp="dde"
+df_dde<-df[order(df$dde_presence),]
+df_dde<-df_dde[df_dde$Lt_cntwgs84<=40 & df_dde$Lt_cntwgs84>=36.299,] 
+df_dde<-df_dde[df_dde$Lng_cntwgs84>=-31.96 & df_dde$Lng_cntwgs84<=-23.56,]
+df_dde$model<-"Sightings"
+
+ggplot()+
+  geom_raster(data=avMonthPred,aes(lon,lat,fill=mean_pred_dde))+
+  geom_point(data=df_dde,aes(Lng_cntwgs84,Lt_cntwgs84,colour=as.factor(dde_presence)),cex=0.0001)+
+  geom_sf(data=Az)+
+  scale_colour_manual(values=c("0"="#BDBDBD","1"="#000000"), labels=c("0"="Absence","1"="Presence"))+
+  labs(fill="Probability of occurrence", colour="Common dolphin")+
+  facet_grid(rows=vars(month),cols=vars(factor(model, levels=c('Sightings', 'GAM', 'BRT', 'Ensemble'))),labeller=labeller(month=month.names))+
+  scale_fill_fermenter(n.breaks=10,palette="RdYlBu",limits=c(0,1),breaks=c(0.05,0.1,0.15,0.2,0.3,0.4,0.5,0.6,0.7),na.value=NA)+
+  guides(colour=guide_legend(order=1,position="bottom",override.aes=list(size=2),theme=theme(legend.title.position="top",legend.text=element_text(size=7),legend.key.size = unit(1,"cm"),legend.key.spacing=unit(0.001, "cm"))),fill=guide_coloursteps(order=2,show.limits = T,even.steps = F,theme=theme(legend.title.position="top",legend.title=element_text(angle=0),legend.text=element_text(size=6),legend.key.width=unit(10,"cm"),legend.key.height =unit(0.5, "cm"))))+
+  xlab("Longitude (ºW)")+
+  ylab("Latitude (ºN)")+
+  scale_x_continuous(labels = label_number()) +
+  scale_y_continuous(labels = label_number(accuracy = 0.1))+
+  theme_classic()+
+  theme(axis.text=element_text(size=6),legend.position="bottom")
+ggsave(paste(mapsdir,"/",sp,"/","avg_map_gam_allin.jpeg",sep=""),plot = last_plot(),width=1771,height=2350,unit="px")
+ggsave(paste(mapsdir,"/",sp,"/","avg_map_gam_allin.tiff",sep=""),plot = last_plot(),dpi=500,width=3000,height=3579,unit="px")
+
+#Prepare SFR sightings and plot
+sp="sfr"
+df_sfr<-df[order(df$sfr_presence),]
+df_sfr<-df_sfr[df_sfr$Lt_cntwgs84<=40 & df_sfr$Lt_cntwgs84>=36.299,] 
+df_sfr<-df_sfr[df_sfr$Lng_cntwgs84>=-31.96 & df_sfr$Lng_cntwgs84<=-23.56,]
+df_sfr$model<-"Sightings"
+
+ggplot()+
+  geom_raster(data=avMonthPred,aes(lon,lat,fill=mean_pred_sfr))+
+  geom_point(data=df_sfr,aes(Lng_cntwgs84,Lt_cntwgs84,colour=as.factor(sfr_presence)),cex=0.0001)+
+  geom_sf(data=Az)+
+  scale_colour_manual(values=c("0"="#BDBDBD","1"="#000000"), labels=c("0"="Absence","1"="Presence"))+
+  labs(fill="Probability of occurrence", colour="Atlantic spotted dolphin")+
+  facet_grid(rows=vars(month),cols=vars(factor(model, levels=c('Sightings', 'GAM', 'BRT', 'Ensemble'))),labeller=labeller(month=month.names))+
+  scale_fill_fermenter(n.breaks=10,palette="RdYlBu",limits=c(0,1),breaks=c(0.05,0.1,0.15,0.2,0.3,0.4,0.5,0.6,0.7),na.value=NA)+
+  guides(fill=guide_coloursteps(order=2,show.limits = T,even.steps = F,theme=theme(legend.title.position="top",legend.title=element_text(angle=0),legend.text=element_text(size=6),legend.key.width=unit(10,"cm"),legend.key.height =unit(0.5, "cm"))),colour=guide_legend(order=1,position="bottom",override.aes=list(size=2),theme=theme(legend.title.position="top",legend.text=element_text(size=7),legend.key.size = unit(1,"cm"),legend.key.spacing=unit(0.001, "cm"))))+
+  xlab("Longitude (ºW)")+
+  ylab("Latitude (ºN)")+
+  scale_x_continuous(labels = label_number()) +
+  scale_y_continuous(labels = label_number(accuracy = 0.1))+
+  theme_classic()+
+  theme(axis.text=element_text(size=6),legend.position="bottom")
+ggsave(paste(mapsdir,"/",sp,"/","avg_map_gam_allin.jpeg",sep=""),plot = last_plot(),width=1900,height=2350,unit="px")
+ggsave(paste(mapsdir,"/",sp,"/","avg_map_gam_allin.tiff",sep=""),plot = last_plot(),dpi=500,width=3123,height=3579,unit="px")
+
+####Compute SD####
+#select only one "grid" to create template df
+pred<-final_pred_df[final_pred_df$year==2001 & final_pred_df$month==5,]
+sdMonthPred<-data.frame(ID=pred$ID,
+                        lon=pred$lon,
+                        lat=pred$lat)
+
+#Calculate sd GAM
+for (m in unique(final_pred_df$month)){
+  pred_m<-final_pred_df[final_pred_df$month==m,]
+  sdMonthPred$month<-m
+  for(i in unique(pred_m$ID)){
+    pred_m_ID<-pred_m[pred_m$ID==i,]
+    sdMonthPred$mean_pred_dde[i]<-sd(pred_m_ID$dde_gam_pred,na.rm=T)
+    sdMonthPred$mean_pred_sfr[i]<-sd(pred_m_ID$sfr_gam_pred,na.rm=T)} 
+  if (m==5){sdMonthPred_f<-sdMonthPred} else {sdMonthPred_f<-rbind(sdMonthPred_f,sdMonthPred)}
+}
+
+sdMonthPred_gam<-sdMonthPred_f
+sdMonthPred_gam$model<-"GAM"
+
+#Calculate sd BRT
+for (m in unique(final_pred_df$month)){
+  pred_m<-final_pred_df[final_pred_df$month==m,]
+  sdMonthPred$month<-m
+  for(i in unique(pred_m$ID)){
+    pred_m_ID<-pred_m[pred_m$ID==i,]
+    sdMonthPred$mean_pred_dde[i]<-sd(pred_m_ID$dde_brt_pred,na.rm=T)
+    sdMonthPred$mean_pred_sfr[i]<-sd(pred_m_ID$sfr_brt_pred,na.rm=T)} 
+  if (m==5){sdMonthPred_f<-sdMonthPred} else {sdMonthPred_f<-rbind(sdMonthPred_f,sdMonthPred)}
+}
+
+sdMonthPred_brt<-sdMonthPred_f
+sdMonthPred_brt$model<-"BRT"
+
+#Calculate sd Ensemble
+for (m in unique(final_pred_df$month)){
+  pred_m<-final_pred_df[final_pred_df$month==m,]
+  sdMonthPred$month<-m
+  for(i in unique(pred_m$ID)){
+    pred_m_ID<-pred_m[pred_m$ID==i,]
+    sdMonthPred$mean_pred_dde[i]<-sd(pred_m_ID$dde_ensbl_pred,na.rm=T)
+    sdMonthPred$mean_pred_sfr[i]<-sd(pred_m_ID$sfr_ensbl_pred,na.rm=T)} 
+  if (m==5){sdMonthPred_f<-sdMonthPred} else {sdMonthPred_f<-rbind(sdMonthPred_f,sdMonthPred)}
+}
+
+sdMonthPred_ensb<-sdMonthPred_f
+sdMonthPred_ensb$model<-"Ensemble"
+
+#Join all sd 
+sdMonthPred<-rbind(sdMonthPred_gam,sdMonthPred_brt,sdMonthPred_ensb)
+
+#Plot monthly SDs for GAM, BRt and Ensemble----
+
+sp="dde"
+ggplot()+
+  geom_raster(data=sdMonthPred,aes(lon,lat,fill=mean_pred_dde))+
+  #geom_point(data=df_dde,aes(Lng_cntwgs84,Lt_cntwgs84,colour=as.factor(dde_presence)),cex=0.0001)+
+  geom_sf(data=Az)+
+  #scale_colour_manual(values=c("0"="#BDBDBD","1"="#000000"), labels=c("0"="Absence","1"="Presence"))+
+  labs(fill="SD")+
+  facet_grid(rows=vars(month),cols=vars(factor(model, levels=c('GAM', 'BRT', 'Ensemble'))),labeller=labeller(month=month.names))+
+  scale_fill_fermenter(n.breaks=6,palette="RdBu",na.value=NA)+
+  guides(colour=guide_legend(order=1,position="bottom",override.aes=list(size=2),theme=theme(legend.title.position="top",legend.text=element_text(size=7),legend.key.size = unit(1,"cm"),legend.key.spacing=unit(0.001, "cm"))),fill=guide_coloursteps(order=2,show.limits = T,even.steps = F,theme=theme(legend.title.position="top",legend.title=element_text(angle=0),legend.text=element_text(size=6),legend.key.width=unit(10,"cm"),legend.key.height =unit(0.5, "cm"))))+
+  xlab("Longitude (ºW)")+
+  ylab("Latitude (ºN)")+
+  scale_x_continuous(labels = label_number()) +
+  scale_y_continuous(labels = label_number(accuracy = 0.1))+
+  theme_classic()+
+  theme(axis.text=element_text(size=6),legend.position="bottom")
+ggsave(paste(mapsdir,"/",sp,"/","sd_map_gam_allin.jpeg",sep=""),plot = last_plot(),width=1771,height=2350,unit="px")
+
+sp="sfr"
+ggplot()+
+  geom_raster(data=sdMonthPred,aes(lon,lat,fill=mean_pred_sfr))+
+  #geom_point(data=df_sfr,aes(Lng_cntwgs84,Lt_cntwgs84,colour=as.factor(sfr_presence)),cex=0.0001)+
+  geom_sf(data=Az)+
+  #scale_colour_manual(values=c("0"="#BDBDBD","1"="#000000"), labels=c("0"="Absence","1"="Presence"))+
+  labs(fill="SD")+
+  facet_grid(rows=vars(month),cols=vars(factor(model, levels=c('GAM', 'BRT', 'Ensemble'))),labeller=labeller(month=month.names))+
+  scale_fill_fermenter(n.breaks=6,palette="RdBu",na.value=NA)+
+  guides(fill=guide_coloursteps(order=2,show.limits = T,even.steps = F,theme=theme(legend.title.position="top",legend.title=element_text(angle=0),legend.text=element_text(size=6),legend.key.width=unit(10,"cm"),legend.key.height =unit(0.5, "cm"))),colour=guide_legend(order=1,position="bottom",override.aes=list(size=2),theme=theme(legend.title.position="top",legend.text=element_text(size=7),legend.key.size = unit(1,"cm"),legend.key.spacing=unit(0.001, "cm"))))+
+  xlab("Longitude (ºW)")+
+  ylab("Latitude (ºN)")+
+  scale_x_continuous(labels = label_number()) +
+  scale_y_continuous(labels = label_number(accuracy = 0.1))+
+  theme_classic()+
+  theme(axis.text=element_text(size=6),legend.position="bottom")
+ggsave(paste(mapsdir,"/",sp,"/","sd_map_gam_allin.jpeg",sep=""),plot = last_plot(),width=1900,height=2350,unit="px")
