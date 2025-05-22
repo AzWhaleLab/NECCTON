@@ -1,1 +1,1800 @@
+#################################################################################################
 
+####Create prediction grid and extract environmental and prey data #########################################
+
+#### Created by Maria Inês Pinheiro da Silva and supervised by Sergi Pérez-Jorge ################
+
+############################## Date: 22  May 2025 ###############################################
+
+#################################################################################################
+
+# Set working directories
+
+path="path to tuna-fishing boat segments"
+envdir="path to store environmental data"
+spdymdir="CMEMS_Seapodym_forcing_variables"
+shapefile="path to shapefiles of the Azores"
+prediction_envdir="path to store environmental data for the predictions"
+
+
+#Create grid
+df<-read.csv(paste(path,"final_df_seg.csv",header=T))
+bb<-bbox(df)
+cs<-c(0.1,0.1)
+cc<-bb[,1]+(cs/2)
+cd<-ceiling(diff(t(bb))/cs)
+grd<-GridTopology(cellcentre.offset = cc, cellsize = cs, cells.dim = cd)
+grid <- SpatialGrid(grd,proj4string=CRS(proj4string(pma)))
+grid_cntr<-coordinates(grid)
+write.csv(grid_cntr, paste(envdir, "grid_cntr.csv", sep=""))
+
+plot(grid, axes=T)
+points(grid_cntr, col="red", pch=16, cex=0.5)
+
+xypel<-grid_cntr
+grid<-grid_cntr
+grid$point_ID <- seq_len(nrow(grid))
+
+#####Extract the environmental variables for the location and date of the centroids of grid#####
+#Same environmental variables used in segments dataframe (script 2a) for the first day of each month from 2001 to 2015
+#4 types of environmental variables were tested:
+# - Satellite based: SST and CHL
+# - SEAPODYM: micronekton and forcing variables
+# - Spatial gradients: from all dynamic variables
+# - Static variables
+
+#####Seapodym variables####
+
+# Establish extent for the cropped rasters 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+####Variables - physical forcings (3 layers: L1, L2, L3):
+#Sea water pelagic layer bottom depth (pelagic_layer_depth)
+#Sea water potential temperature vertical mean over pelagic layer (T)
+#Eastward sea water velocity vertical mean over pelagic layer (U)
+#Northward sea water velocity vertical mean over pelagic layer (V)
+
+####Variables - main dataset:
+#Mass content of zooplankton expressed as carbon in sea water (zooc)
+#Mass content of epipelagic micronekton expressed as wet weight in sea water (mnkc_epi)
+#Mass content of upper mesopelagic micronekton expressed as wet weight in sea water (mnkc_umeso)
+#Mass content of migrant upper mesopelagic micronekton expressed as wet weight in sea water (mnkc_mumeso)
+#Mass content of lower mesopelagic micronekton expressed as wet weight in sea water (mnkc_lmeso)
+#Mass content of migrant lower mesopelagic micronekton expressed as wet weight in sea water (mnkc_mlmeso)
+#Mass content of highly migrant lower mesopelagic micronekton expressed as wet weight in sea water (mnkc_hmlmeso)
+#Net primary productivity of biomass expressed as carbon in sea water (npp)
+#Euphotic zone depth (zeu)
+
+
+########################################### Seapodym variables: Physical forcings
+
+spdym_files = "path to forcing variables of the seapodym files (https://data.marine.copernicus.eu/product/GLOBAL_ANALYSISFORECAST_BGC_001_028/description)"
+
+length(spdym_files) #96
+
+#make sure files are in chronological order
+Dates <- gsub(".*_(\\d{8})\\.nc", "\\1", basename(spdym_files))  # Extracts Dates in the format YYYYMMDD
+Dates <- as.Date(Dates, format = "%Y%m%d")  # Convert Dates to Date format
+spdym_files <- spdym_files[order(Dates)] ## Sort file names based on Dates
+
+
+################ Variable: pelagic_layer_depth (L1: [1])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to pelagic_layer_depth_L1 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "pelagic_layer_depth")
+  r_epipelagic <- r[[1]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "pelagic_layer_depth", overwrite = TRUE)
+}
+
+spdym_pelagic_layer_depth_L1_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_pelagic_layer_depth_L1 <- stack(spdym_pelagic_layer_depth_L1_files, varname = "pelagic_layer_depth") #stack of layers from each  
+nlayers(stack_pelagic_layer_depth_L1)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_pelagic_layer_depth_L1 <- raster::setZ(stack_pelagic_layer_depth_L1,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_pelagic_layer_depth_L1 with the corresponding dates
+dates <- getZ(stack_pelagic_layer_depth_L1)
+names(stack_pelagic_layer_depth_L1) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_pelagic_layer_depth_L1_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_pelagic_layer_depth_L1, c(lon, lat))  # Assuming stack_pelagic_layer_depth_L1 is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_pelagic_layer_depth_L1, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_pelagic_layer_depth_L1 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_pelagic_layer_depth_L1_df <- rbind(extracted_spdym_pelagic_layer_depth_L1_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_pelagic_layer_depth_L1_df,paste(prediction_envdir, "extracted_spdym_pelagic_layer_depth_L1.RDS"))
+
+
+################ Variable: T (layer: [1])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to T_L1 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "T")
+  r_epipelagic <- r[[1]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "T", overwrite = TRUE)
+}
+
+spdym_T_L1_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_T <- stack(spdym_T_L1_files, varname = "T") #stack of layers from each  
+nlayers(stack_T)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_T <- raster::setZ(stack_T,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_T with the corresponding dates
+dates <- getZ(stack_T)
+names(stack_T) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_T_L1_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_T, c(lon, lat))  # Assuming stack_T is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_T, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_T_L1 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_T_L1_df <- rbind(extracted_spdym_T_L1_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_T_L1_df,paste(prediction_envdir, "extracted_spdym_T_L1.RDS"))
+
+
+
+################ Variable: V  (layer: [1])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to v_L1 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "V")
+  r_epipelagic <- r[[1]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "V", overwrite = TRUE)
+}
+
+spdym_V_L1_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_V <- stack(spdym_V_L1_files, varname = "V") #stack of layers from each  
+nlayers(stack_V)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_V <- raster::setZ(stack_V,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_V with the corresponding dates
+dates <- getZ(stack_V)
+names(stack_V) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_V_L1_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_V, c(lon, lat))  # Assuming stack_V is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_V, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_V_L1 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_V_L1_df <- rbind(extracted_spdym_V_L1_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_V_L1_df,paste(prediction_envdir, "extracted_spdym_V_L1.RDS"))
+
+
+################ Variable: U (layer: [1])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to U_L1 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "U")
+  r_epipelagic <- r[[1]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "U", overwrite = TRUE)
+}
+
+spdym_U_L1_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_U <- stack(spdym_U_L1_files, varname = "U") #stack of layers from each  
+nlayers(stack_U)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_U <- raster::setZ(stack_U,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_U with the corresponding dates
+dates <- getZ(stack_U)
+names(stack_U) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_U_L1_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_U, c(lon, lat))  # Assuming stack_U is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_U, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_U_L1 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_U_L1_df <- rbind(extracted_spdym_U_L1_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_U_L1_df,paste(prediction_envdir, "extracted_spdym_U_L1.RDS"))
+
+
+################ Variable: pelagic_layer_depth (L2: [2])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to pelagic_layer_depth_L2 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "pelagic_layer_depth")
+  r_epipelagic <- r[[2]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "pelagic_layer_depth", overwrite = TRUE)
+}
+
+spdym_pelagic_layer_depth_L2_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_pelagic_layer_depth_L2 <- stack(spdym_pelagic_layer_depth_L2_files, varname = "pelagic_layer_depth") #stack of layers from each  
+nlayers(stack_pelagic_layer_depth_L2)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_pelagic_layer_depth_L2 <- raster::setZ(stack_pelagic_layer_depth_L2,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_pelagic_layer_depth_L2 with the corresponding dates
+dates <- getZ(stack_pelagic_layer_depth_L2)
+names(stack_pelagic_layer_depth_L2) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_pelagic_layer_depth_L2_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_pelagic_layer_depth_L2, c(lon, lat))  # Assuming stack_pelagic_layer_depth_L2 is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_pelagic_layer_depth_L2, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_pelagic_layer_depth_L2 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_pelagic_layer_depth_L2_df <- rbind(extracted_spdym_pelagic_layer_depth_L2_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_pelagic_layer_depth_L2_df,paste(prediction_envdir, "extracted_spdym_pelagic_layer_depth_L2.RDS"))
+
+
+
+################ Variable: T (layer: [2])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to pelagic_layer_depth_L2 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "T")
+  r_epipelagic <- r[[2]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "T", overwrite = TRUE)
+}
+
+spdym_T_L2_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_T <- stack(spdym_T_L2_files, varname = "T") #stack of layers from each  
+nlayers(stack_T)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_T <- raster::setZ(stack_T,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_T with the corresponding dates
+dates <- getZ(stack_T)
+names(stack_T) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_T_L2_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_T, c(lon, lat))  # Assuming stack_T is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_T, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_T_L2 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_T_L2_df <- rbind(extracted_spdym_T_L2_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_T_L2_df,paste(prediction_envdir, "extracted_spdym_T_L2.RDS"))
+
+
+
+################ Variable: V  (layer: [2])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to V_L2 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "V")
+  r_epipelagic <- r[[2]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "V", overwrite = TRUE)
+}
+
+spdym_V_L2_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_V <- stack(spdym_V_L2_files, varname = "V") #stack of layers from each  
+nlayers(stack_V)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_V <- raster::setZ(stack_V,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_V with the corresponding dates
+dates <- getZ(stack_V)
+names(stack_V) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_V_L2_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_V, c(lon, lat))  # Assuming stack_V is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_V, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_V_L2 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_V_L2_df <- rbind(extracted_spdym_V_L2_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_V_L2_df,paste(prediction_envdir, "extracted_spdym_V_L2_df.RDS"))
+
+
+################ Variable: U (layer: [2])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to U_L2 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "U")
+  r_epipelagic <- r[[2]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "U", overwrite = TRUE)
+}
+
+spdym_U_L2_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_U <- stack(spdym_U_L2_files, varname = "U") #stack of layers from each  
+nlayers(stack_U)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_U <- raster::setZ(stack_U,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_U with the corresponding dates
+dates <- getZ(stack_U)
+names(stack_U) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_U_L2_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_U, c(lon, lat))  # Assuming stack_U is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_U, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_U_L2 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_U_L2_df <- rbind(extracted_spdym_U_L2_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_U_L2_df,paste(prediction_envdir, "extracted_spdym_U_L2.RDS"))
+
+
+################ Variable: pelagic_layer_depth (L3: [3])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to pelagic_layer_depth_L3 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "pelagic_layer_depth")
+  r_epipelagic <- r[[3]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "pelagic_layer_depth", overwrite = TRUE)
+}
+
+spdym_pelagic_layer_depth_L3_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_pelagic_layer_depth_L3 <- stack(spdym_pelagic_layer_depth_L3_files, varname = "pelagic_layer_depth") #stack of layers from each  
+nlayers(stack_pelagic_layer_depth_L3)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_pelagic_layer_depth_L3 <- raster::setZ(stack_pelagic_layer_depth_L3,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_pelagic_layer_depth_L3 with the corresponding dates
+dates <- getZ(stack_pelagic_layer_depth_L3)
+names(stack_pelagic_layer_depth_L3) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_pelagic_layer_depth_L3_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_pelagic_layer_depth_L3, c(lon, lat))  # Assuming stack_pelagic_layer_depth_L3 is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_pelagic_layer_depth_L3, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_pelagic_layer_depth_L3 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_pelagic_layer_depth_L3_df <- rbind(extracted_spdym_pelagic_layer_depth_L3_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_pelagic_layer_depth_L3_df,paste(prediction_envdir, "extracted_spdym_pelagic_layer_depth_L3.RDS"))
+
+
+################ Variable: T (layer: [3])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to T_L3 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "T")
+  r_epipelagic <- r[[3]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "T", overwrite = TRUE)
+}
+
+spdym_T_L3_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_T <- stack(spdym_T_L3_files, varname = "T") #stack of layers from each  
+nlayers(stack_T)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_T <- raster::setZ(stack_T,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_T with the corresponding dates
+dates <- getZ(stack_T)
+names(stack_T) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_T_L3_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_T, c(lon, lat))  # Assuming stack_T is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_T, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_T_L3 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_T_L3_df <- rbind(extracted_spdym_T_L3_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_T_L3_df,paste(prediction_envdir, "extracted_spdym_T_L3.RDS"))
+
+################ Variable: V  (layer: [3])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to V_L3 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "V")
+  r_epipelagic <- r[[3]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "V", overwrite = TRUE)
+}
+
+spdym_V_L3_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_V <- stack(spdym_V_L3_files, varname = "V") #stack of layers from each  
+nlayers(stack_V)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_V <- raster::setZ(stack_V,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_V with the corresponding dates
+dates <- getZ(stack_V)
+names(stack_V) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_V_L3_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_V, c(lon, lat))  # Assuming stack_V is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_V, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_V_L3 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_V_L3_df <- rbind(extracted_spdym_V_L3_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_V_L3_df,paste(prediction_envdir, "extracted_spdym_V_L3.RDS"))
+
+
+################ Variable: U (layer: [3])
+
+### 1) Crop variable layers 
+e <- extent(-60.04167, 0.04166667, 14.95833, 67.04167)    #xmin, xmax, ymin, ymax
+
+fout = "path to U_L3 of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "U")
+  r_epipelagic <- r[[3]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "U", overwrite = TRUE)
+}
+
+spdym_U_L3_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_U <- stack(spdym_U_L3_files, varname = "U") #stack of layers from each  
+nlayers(stack_U)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_U <- raster::setZ(stack_U,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_U with the corresponding dates
+dates <- getZ(stack_U)
+names(stack_U) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_U_L3_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_U, c(lon, lat))  # Assuming stack_U is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_U, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_U_L3 = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_U_L3_df <- rbind(extracted_spdym_U_L3_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_U_L3_df,paste(prediction_envdir, "extracted_spdym_U_L3.RDS"))
+
+
+########################################### Seapodym variables: main variables 
+
+spdym_files_main = "path to SEAPODYM files"
+length(spdym_files_main) #96
+
+#make sure files are in chronological order
+Dates <- gsub(".*_(\\d{8})\\.nc", "\\1", basename(spdym_files_main))  # Extracts Dates in the format YYYYMMDD
+Dates <- as.Date(Dates, format = "%Y%m%d")  # Convert Dates to Date format
+spdym_files_main <- spdym_files_main[order(Dates)] ## Sort file names based on Dates
+
+
+################ 1. Variable: zooc
+
+### 1) Crop variable layers 
+
+fout = "path to zooc_cropped of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files_main)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files_main[i], varname = "zooc")
+  r_cropped <- crop(r, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "zooc", overwrite = TRUE)
+}
+
+spdym_zooc_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_zooc <- stack(spdym_zooc_files, varname = "zooc") #stack of layers from each  
+nlayers(stack_zooc)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_zooc <- raster::setZ(stack_zooc,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_zooc with the corresponding dates
+dates <- getZ(stack_zooc)
+names(stack_zooc) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_zooc_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_zooc, c(lon, lat))  # Assuming stack_zooc is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_zooc, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_zooc = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_zooc_df <- rbind(extracted_spdym_zooc_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_zooc_df,paste(prediction_envdir, "extracted_spdym_zooc.RDS"))
+
+
+################ 2. Variable: mnkc_epi
+
+### 1) Crop variable layers 
+
+fout = "path to mnkc_epi_cropped of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files_main)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files_main[i], varname = "mnkc_epi")
+  r_cropped <- crop(r, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "mnkc_epi", overwrite = TRUE)
+}
+
+spdym_mnkc_epi_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_mnkc_epi <- stack(spdym_mnkc_epi_files, varname = "mnkc_epi") #stack of layers from each  
+nlayers(stack_mnkc_epi)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_mnkc_epi <- raster::setZ(stack_mnkc_epi,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_mnkc_epi with the corresponding dates
+dates <- getZ(stack_mnkc_epi)
+names(stack_mnkc_epi) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_mnkc_epi_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_mnkc_epi, c(lon, lat))  # Assuming stack_mnkc_epi is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_mnkc_epi, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_mnkc_epi = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_mnkc_epi_df <- rbind(extracted_spdym_mnkc_epi_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_mnkc_epi_df,paste(prediction_envdir, "extracted_spdym_mnkc_epi.RDS"))
+
+################ 3. Variable: mnkc_umeso
+
+### 1) Crop variable layers 
+
+fout = "path to mnkc_umeso_cropped of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files_main)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files_main[i], varname = "mnkc_umeso")
+  r_cropped <- crop(r, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "mnkc_umeso", overwrite = TRUE)
+}
+
+spdym_mnkc_umeso_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_mnkc_umeso <- stack(spdym_mnkc_umeso_files, varname = "mnkc_umeso") #stack of layers from each  
+nlayers(stack_mnkc_umeso)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_mnkc_umeso <- raster::setZ(stack_mnkc_umeso,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_mnkc_umeso with the corresponding dates
+dates <- getZ(stack_mnkc_umeso)
+names(stack_mnkc_umeso) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_mnkc_umeso_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_mnkc_umeso, c(lon, lat))  # Assuming stack_mnkc_umeso is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_mnkc_umeso, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_mnkc_umeso = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_mnkc_umeso_df <- rbind(extracted_spdym_mnkc_umeso_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_mnkc_umeso_df,paste(prediction_envdir, "extracted_spdym_mnkc_umeso.RDS"))
+
+
+################ 4. Variable: mnkc_mumeso
+
+### 1) Crop variable layers 
+
+fout = "path to mnkc_mumeso_cropped of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files_main)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files_main[i], varname = "mnkc_mumeso")
+  r_cropped <- crop(r, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "mnkc_mumeso", overwrite = TRUE)
+}
+
+spdym_mnkc_mumeso_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_mnkc_mumeso <- stack(spdym_mnkc_mumeso_files, varname = "mnkc_mumeso") #stack of layers from each  
+nlayers(stack_mnkc_mumeso)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_mnkc_mumeso <- raster::setZ(stack_mnkc_mumeso,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_mnkc_mumeso with the corresponding dates
+dates <- getZ(stack_mnkc_mumeso)
+names(stack_mnkc_mumeso) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_mnkc_mumeso_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_mnkc_mumeso, c(lon, lat))  # Assuming stack_mnkc_mumeso is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_mnkc_mumeso, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_mnkc_mumeso = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_mnkc_mumeso_df <- rbind(extracted_spdym_mnkc_mumeso_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_mnkc_mumeso_df,paste(prediction_envdir, "extracted_spdym_mnkc_mumeso.RDS"))
+
+
+################ 5. Variable: mnkc_lmeso
+
+### 1) Crop variable layers 
+
+fout = "path to mnkc_lmeso_cropped of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files_main)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files_main[i], varname = "mnkc_lmeso")
+  r_cropped <- crop(r, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "mnkc_lmeso", overwrite = TRUE)
+}
+
+spdym_mnkc_lmeso_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_mnkc_lmeso <- stack(spdym_mnkc_lmeso_files, varname = "mnkc_lmeso") #stack of layers from each  
+nlayers(stack_mnkc_lmeso)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_mnkc_lmeso <- raster::setZ(stack_mnkc_lmeso,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_mnkc_lmeso with the corresponding dates
+dates <- getZ(stack_mnkc_lmeso)
+names(stack_mnkc_lmeso) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_mnkc_lmeso_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_mnkc_lmeso, c(lon, lat))  # Assuming stack_mnkc_lmeso is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_mnkc_lmeso, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_mnkc_lmeso = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_mnkc_lmeso_df <- rbind(extracted_spdym_mnkc_lmeso_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_mnkc_lmeso_df,paste(prediction_envdir, "extracted_spdym_mnkc_lmeso.RDS"))
+
+
+################ 6. Variable: mnkc_mlmeso
+
+### 1) Crop variable layers 
+
+fout = "path to mnkc_mlmeso_cropped of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files_main)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files_main[i], varname = "mnkc_mlmeso")
+  r_cropped <- crop(r, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "mnkc_mlmeso", overwrite = TRUE)
+}
+
+spdym_mnkc_mlmeso_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_mnkc_mlmeso <- stack(spdym_mnkc_mlmeso_files, varname = "mnkc_mlmeso") #stack of layers from each  
+nlayers(stack_mnkc_mlmeso)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_mnkc_mlmeso <- raster::setZ(stack_mnkc_mlmeso,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_mnkc_mlmeso with the corresponding dates
+dates <- getZ(stack_mnkc_mlmeso)
+names(stack_mnkc_mlmeso) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_mnkc_mlmeso_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_mnkc_mlmeso, c(lon, lat))  # Assuming stack_mnkc_mlmeso is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_mnkc_mlmeso, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_mnkc_mlmeso = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_mnkc_mlmeso_df <- rbind(extracted_spdym_mnkc_mlmeso_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_mnkc_mlmeso_df,paste(prediction_envdir, "extracted_spdym_mnkc_mlmeso.RDS"))
+
+
+
+################ 7. Variable: mnkc_hmlmeso
+
+### 1) Crop variable layers 
+
+fout = "path to mnkc_hmlmeso_cropped of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files_main)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files_main[i], varname = "mnkc_hmlmeso")
+  r_cropped <- crop(r, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "mnkc_hmlmeso", overwrite = TRUE)
+}
+
+spdym_mnkc_hmlmeso_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_mnkc_hmlmeso <- stack(spdym_mnkc_hmlmeso_files, varname = "mnkc_hmlmeso") #stack of layers from each  
+nlayers(stack_mnkc_hmlmeso)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_mnkc_hmlmeso <- raster::setZ(stack_mnkc_hmlmeso,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_mnkc_hmlmeso with the corresponding dates
+dates <- getZ(stack_mnkc_hmlmeso)
+names(stack_mnkc_hmlmeso) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_mnkc_hmlmeso_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_mnkc_hmlmeso, c(lon, lat))  # Assuming stack_mnkc_hmlmeso is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_mnkc_hmlmeso, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_mnkc_hmlmeso = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_mnkc_hmlmeso_df <- rbind(extracted_spdym_mnkc_hmlmeso_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_mnkc_hmlmeso_df,paste(prediction_envdir, "extracted_spdym_mnkc_hmlmeso.RDS"))
+
+
+
+################ 8. Variable: npp
+
+### 1) Crop variable layers 
+
+fout = "path to npp_cropped of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files_main)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files_main[i], varname = "npp")
+  r_cropped <- crop(r, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "npp", overwrite = TRUE)
+}
+
+spdym_npp_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_npp <- stack(spdym_npp_files, varname = "npp") #stack of layers from each  
+nlayers(stack_npp)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_npp <- raster::setZ(stack_npp,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_npp with the corresponding dates
+dates <- getZ(stack_npp)
+names(stack_npp) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_npp_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_npp, c(lon, lat))  # Assuming stack_npp is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_npp, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_npp = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_npp_df <- rbind(extracted_spdym_npp_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_npp_df,paste(prediction_envdir, "extracted_spdym_npp_df.RDS"))
+
+
+################ 9. Variable: zeu
+
+### 1) Crop variable layers 
+
+fout = "path to zeu_cropped of spdym_files"
+
+# Loop through each NetCDF file
+for (i in seq_along(spdym_files_main)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files_main[i], varname = "zeu")
+  r_cropped <- crop(r, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "zeu", overwrite = TRUE)
+}
+
+spdym_zeu_files ="path to cropped files"
+
+### 2) convert to rasterstack 
+stack_zeu <- stack(spdym_zeu_files, varname = "zeu") #stack of layers from each  
+nlayers(stack_zeu)
+
+### 2) Assign date index 
+
+index <- Dates #make sequence of Dates corresponding to Dates of environmental layers
+stack_zeu <- raster::setZ(stack_zeu,index) #assign each raster layer in stack a timestamp by date
+
+# Rename the layers in stack_zeu with the corresponding dates
+dates <- getZ(stack_zeu)
+names(stack_zeu) <- dates
+
+## 3) Extract raster values for each point 
+
+# Create an empty dataframe to store extracted values
+extracted_spdym_zeu_df <- data.frame()
+
+# Iterate over each row in the dataframe
+start_time <- Sys.time()
+for (i in 1:nrow(grid)) {
+  # Extract latitude and longitude from the dataframe
+  lat <- grid[i, "Lt_cntwgs84"] 
+  lon <- grid[i, "Lng_cntwgs84"]
+  
+  # Find the cell index corresponding to the latitude and longitude in the raster stack
+  cell_index <- cellFromXY(stack_zeu, c(lon, lat))  # Assuming stack_zeu is the raster stack
+  
+  # Extract raster values at the given latitude and longitude
+  values <- raster::extract(stack_zeu, cell_index) # 192 values
+  
+  # Create a dataframe for the current lat-long combination
+  lat_long_df <- data.frame(
+    point_ID = rep(grid[i, "point_ID"], ncol(values)),
+    Lt_cntwgs84 = rep(lat, ncol(values)),
+    Lng_cntwgs84 = rep(lon, ncol(values)),
+    Date = colnames(values),
+    spdym_zeu = as.vector(values)  # Ensure that values are stored as a vector
+  )
+  
+  # Append the dataframe for the current lat-long combination to the main dataframe
+  extracted_spdym_zeu_df <- rbind(extracted_spdym_zeu_df, lat_long_df)
+}
+end_time <- Sys.time()
+execution_time <- end_time - start_time #1.383374 hours
+saveRDS(extracted_spdym_zeu_df,paste(prediction_envdir, "extracted_spdym_zeu_df.RDS"))
+
+
+################################### Join dataframes 
+
+extracted_spdym_pelagic_layer_depth_L1 <- readRDS(paste(prediction_envdir,"extracted_spdym_pelagic_layer_depth_L1.RDS"))
+extracted_spdym_pelagic_layer_depth_L2 <- readRDS(paste(prediction_envdir,"extracted_spdym_pelagic_layer_depth_L2.RDS"))
+extracted_spdym_pelagic_layer_depth_L3 <- readRDS(paste(prediction_envdir,"extracted_spdym_pelagic_layer_depth_L3.RDS"))
+
+extracted_spdym_T_L1 <- readRDS(paste(prediction_envdir,"extracted_spdym_T_L1.RDS"))
+extracted_spdym_T_L2 <- readRDS(paste(prediction_envdir,"extracted_spdym_T_L2.RDS"))
+extracted_spdym_T_L3 <- readRDS(paste(prediction_envdir,"extracted_spdym_T_L3.RDS"))
+
+extracted_spdym_U_L1 <- readRDS(paste(prediction_envdir,"extracted_spdym_U_L1.RDS"))
+extracted_spdym_U_L2 <- readRDS(paste(prediction_envdir,"extracted_spdym_U_L2.RDS"))
+extracted_spdym_U_L3 <- readRDS(paste(prediction_envdir,"Cextracted_spdym_U_L3.RDS"))
+
+extracted_spdym_V_L1 <- readRDS(paste(prediction_envdir,"extracted_spdym_V_L1.RDS"))
+extracted_spdym_V_L2 <- readRDS(paste(prediction_envdir,"extracted_spdym_V_L2.RDS"))
+extracted_spdym_V_L3 <- readRDS(paste(prediction_envdir,"extracted_spdym_V_L3.RDS"))
+
+extracted_spdym_zooc <- readRDS(paste(prediction_envdir,"extracted_spdym_zooc.RDS"))
+extracted_spdym_mnkc_epi <- readRDS(paste(prediction_envdir,"extracted_spdym_mnkc_epi.RDS"))
+extracted_spdym_mnkc_umeso <- readRDS(paste(prediction_envdir,"extracted_spdym_mnkc_umeso.RDS"))
+extracted_spdym_mnkc_mumeso <- readRDS(paste(prediction_envdir,"extracted_spdym_mnkc_mumeso.RDS"))
+extracted_spdym_mnkc_lmeso <- readRDS(paste(prediction_envdir,"extracted_spdym_mnkc_lmeso.RDS"))
+extracted_spdym_mnkc_mlmeso <- readRDS(paste(prediction_envdir,"extracted_spdym_mnkc_mlmeso.RDS"))
+extracted_spdym_mnkc_hmlmeso <- readRDS(paste(prediction_envdir,"extracted_spdym_mnkc_hmlmeso.RDS"))
+extracted_spdym_npp <- readRDS(paste(prediction_envdir,"extracted_spdym_npp.RDS"))
+extracted_spdym_zeu <- readRDS(paste(prediction_envdir,"extracted_spdym_zeu.RDS"))
+
+View(extracted_spdym_T_L1)
+
+colnames(extracted_spdym_pelagic_layer_depth_L1)[colnames(extracted_spdym_pelagic_layer_depth_L1) == "spdym_pelagic_layer_depth"] <- "spdym_pelagic_layer_depth_L1"
+colnames(extracted_spdym_T_L1)[colnames(extracted_spdym_T_L1) == "spdym_T"] <- "spdym_T_L1"
+colnames(extracted_spdym_V_L1)[colnames(extracted_spdym_V_L1) == "spdym_V"] <- "spdym_V_L1"
+colnames(extracted_spdym_U_L1)[colnames(extracted_spdym_U_L1) == "spdym_U"] <- "spdym_U_L1"
+
+
+extracted_spdym <- data.frame(extracted_spdym_pelagic_layer_depth_L1[ , c("point_ID", "Lt_cntwgs84", "Lng_cntwgs84", "Date", "spdym_pelagic_layer_depth_L1")],
+                              spdym_pelagic_layer_depth_L2 = extracted_spdym_pelagic_layer_depth_L2[ , "spdym_pelagic_layer_depth_L2"],
+                              spdym_pelagic_layer_depth_L3 = extracted_spdym_pelagic_layer_depth_L3[ , "spdym_pelagic_layer_depth_L3"],
+                              spdym_T_L1 = extracted_spdym_T_L1[ , "spdym_T_L1"],
+                              spdym_T_L2 = extracted_spdym_T_L2[ , "spdym_T_L2"],
+                              spdym_T_L3 = extracted_spdym_T_L3[ , "spdym_T_L3"],
+                              spdym_U_L1 = extracted_spdym_U_L1[ , "spdym_U_L1"],
+                              spdym_U_L2 = extracted_spdym_U_L2[ , "spdym_U_L2"],
+                              spdym_U_L3 = extracted_spdym_U_L3[ , "spdym_U_L3"],
+                              spdym_V_L1 = extracted_spdym_V_L1[ , "spdym_V_L1"],
+                              spdym_V_L2 = extracted_spdym_V_L2[ , "spdym_V_L2"],
+                              spdym_V_L3 = extracted_spdym_V_L3[ , "spdym_V_L3"],
+                              spdym_zooc = extracted_spdym_zooc[ , "spdym_zooc"],
+                              spdym_mnkc_epi = extracted_spdym_mnkc_epi[ , "spdym_mnkc_epi"],
+                              spdym_mnkc_umeso = extracted_spdym_mnkc_umeso[ , "spdym_mnkc_umeso"],
+                              spdym_mnkc_mumeso = extracted_spdym_mnkc_mumeso[ , "spdym_mnkc_mumeso"],
+                              spdym_mnkc_lmeso = extracted_spdym_mnkc_lmeso[ , "spdym_mnkc_lmeso"],
+                              spdym_mnkc_mlmeso = extracted_spdym_mnkc_mlmeso[ , "spdym_mnkc_mlmeso"],
+                              spdym_mnkc_hmlmeso = extracted_spdym_mnkc_hmlmeso[ , "spdym_mnkc_hmlmeso"],
+                              spdym_npp = extracted_spdym_npp[ , "spdym_npp"],
+                              spdym_zeu = extracted_spdym_zeu[ , "spdym_zeu"])
+
+
+saveRDS(extracted_spdym,paste(prediction_envdir, "extracted_spdym.RDS"))
+write.csv(extracted_spdym,paste(prediction_envdir, "extracted_spdym.csv"))
+
+View(extracted_spdym)
+
+#####After extracting seapodym variables, final dataframe includes stacked grids one for each month of the study period Apr-Sep 2001-2016----
+#This dataframe is used to extract the remaining variables
+grid<-readRDS(paste(prediction_envdir, "extracted_spdym.RDS"))
+grid <- grid[order(grid$Date),]
+nlev_Dates<-nlevels(factor(grid$Date)) 
+list_Dates<-levels(factor(grid$Date))
+dates_2m<-list_Dates %m-% months(2)
+
+#####Spatial gradients####
+
+##chl
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(grid, grid$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(path, "/CHL/chl_", list_Dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="CHL")
+  e<-getGradients(x=divendres)
+  filename<-paste(chldir,"Gradchl_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_chl"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_chl<-hh7$Grad_chl
+grad_chl[is.na(grad_chl)] <- 0
+write.csv(grad_chl,paste(prediction_envdir, "grad_chl.csv"))
+
+
+##sst
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(grid, grid$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(path, "/SST/sst_", list_Dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="thetao")
+  e<-getGradients(x=divendres)
+  filename<-paste(sstdir,"Gradsst_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_sst"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_sst<-hh7$Grad_sst
+grad_sst[is.na(grad_sst)] <- 0
+write.csv(grad_sst,paste(prediction_envdir, "grad_sst.csv"))
+
+##chl_2m
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(grid, grid$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(path, "/CHL/chl_", dates_2m[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="CHL")
+  e<-getGradients(x=divendres)
+  filename<-paste(chldir,"Gradchl2m_",dates_2m[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_chl_2m"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_chl_2m<-hh7$Grad_chl_2m
+grad_chl_2m[is.na(grad_chl_2m)] <- 0
+write.csv(grad_chl_2m,paste(prediction_envdir, "grad_chl_2m.csv"))
+
+##Extract grad_ek_L1##
+for (l in 1:length(list_Dates)){
+  hh4<-subset(grid, grid$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(grad_ek_L1, "Grad_ek_L1_", list_Dates[l], ".grd", sep="")    
+  divendres <- raster(ncname)
+  hh4 <- raster::extract(divendres, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"grad_ek_L1"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+grad_ek_L1<-hh7$grad_ek_L1
+write.csv(grad_ek_L1,paste(prediction_envdir, "grad_ek_L1.csv"))
+
+##Extract grad_hmlmeso##
+for (l in 1:length(list_Dates)){
+  hh4<-subset(grid, grid$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(grad_hmlmeso, "Grad_hmlmeso_", list_Dates[l], ".grd", sep="")    
+  divendres <- raster(ncname)
+  hh4 <- raster::extract(divendres, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"grad_hmlmeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+grad_hmlmeso<-hh7$grad_hmlmeso
+write.csv(grad_hmlmeso,paste(prediction_envdir, "grad_hmlmeso.csv"))
+
+#####Static variables####
+
+#Distance to coast
+coast <- shapefile(paste(shapefiles,"Azores.shp"))
+dist_coast<-NULL #Distance to coast 
+
+for(i in 1:nrow(xypel)) {
+  dist_coast[i] <- dist2Line(xypel[i,], coast)
+}
+
+dist_coast<-as.data.frame(dist_coast)
+write.csv(dist_coast, paste(prediction_envdir, "dist_coast.csv", sep=""))
+
+
+#Distance to seamounts
+seamount <- shapefile(paste(shapefiles,"SMNTSall.shp"))
+dist_smnt<-NULL #Distance to seamounts
+
+for(i in 1:nrow(xypel)) {
+  dist_smnt[i] <- dist2Line(xypel[i,], seamount)
+}
+
+dist_smnt<-as.data.frame(dist_smnt)
+write.csv(dist_smnt, paste(prediction_envdir, "dist_smnt.csv", sep=""))
+
+#Distance to 500m
+iso_500m <- shapefile(paste(shapefiles,"ctr_mdt_n_atlantic-500m.shp"))
+iso_500m<-sp::spTransform(iso_500m, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+
+dist_500m<-NULL 
+for(i in 1:nrow(xypel)) {
+  
+  dist_500m[i] <- dist2Line(xypel[i,], iso_500m)}
+
+
+dist_500m<-as.data.frame(dist_500m)
+write.csv(dist_500m, paste(prediction_envdir, "dist_500m.csv", sep=""))
+
+#Distance to 1000m
+iso_1000m <- shapefile(paste(shapefiles,"ctr_mdt_n_atlantic-1000m.shp"))
+iso_1000m<-sp::spTransform(iso_1000m, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+
+dist_1000m<-NULL
+for(i in 1:nrow(xypel)) {
+  
+  dist_1000m[i] <- dist2Line(xypel[i,], iso_1000m)}
+
+dist_1000m<-as.data.frame(dist_1000m)
+write.csv(dist_1000m, paste(prediction_envdir, "dist_1000m.csv", sep=""))
+
+#Depth and slope
+bat<-raster(paste(shapefiles,"gebco_08_26N.img"))#26N
+#plot(bat)
+bat<-projectRaster(bat, crs=crs(template))
+#plot(bat)
+r=raster::resample(bat,template,method="bilinear")
+writeRaster(r,paste(prediction_envdir,"/depth",sep=""), overwrite=T)
+
+slope<-raster(paste(shapefiles,"slope28620d.grd"))#26N
+
+#plot(bat)
+slope<-projectRaster(slope, res=res(template), crs=crs(template))
+#plot(bat)
+r=raster::resample(slope,template,method="bilinear")
+writeRaster(r,paste(prediction_envdir,"/slope",sep=""), overwrite=T)
+
+#####Satellite variables####
+##HERE IS FOR THE PREDICTIONS THIS DATA?
+sstdir=paste(envir,"/SST/", sep="")
+chldir=paste0(path, "/CHL/", sep="")
+
+##SST
+for (l in 1:nlev_Dates){
+  print(list_Dates[l])
+  hh4<-subset(grid, grid$Date==list_Dates[l])
+  ncname<-paste(sstdir, "sst_", list_Dates[l], ".nc", sep="")    
+  divendres <- brick(ncname,varname="thetao" )
+  coordinates(hh4)<-~Lng_cntwgs84+Lt_cntwgs84
+  v<-raster::extract(divendres,hh4)
+  hh5<-as.data.frame(v)
+  names(hh5)<-"sst"
+  test<-data.frame(lon=hh4_df$Lng_cntwgs84,lat=hh4_df$Lt_cntwgs84,value=hh5$sst)
+  t <- rasterFromXYZ(as.data.frame(test)[, c("lon", "lat", "value")])
+  plot(t)
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+sst<-hh7$chl
+
+##CHL
+for (l in 1:nlev_Dates){
+  print(list_Dates[l])
+  hh4<-subset(grid, grid$Date==list_Dates[l])
+  ncname<-paste(chldir, "chl_", list_Dates[l], ".nc", sep="")    
+  divendres <- brick(ncname,varname="CHL" )
+  coordinates(hh4)<-~Lng_cntwgs84+Lt_cntwgs84
+  v<-raster::extract(divendres,hh4)
+  hh5<-as.data.frame(v)
+  names(hh5)<-"chl"
+  test<-data.frame(lon=hh4_df$Lng_cntwgs84,lat=hh4_df$Lt_cntwgs84,value=hh5$chl)
+  t <- rasterFromXYZ(as.data.frame(test)[, c("lon", "lat", "value")])
+  plot(t)
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+chl<-hh7$chl
+
+##CHL_2m
+dates<-as.Date(list_Dates)
+dates1<- dates %m-% months(2)
+list_Dates<-levels(factor(dates1))
+
+for (l in 1:nlev_Dates){
+  print(list_Dates[l])
+  hh4<-subset(grid, grid$Date==list_Dates[l])
+  ncname<-paste(chldir, "chl_", dates1[l], ".nc", sep="")    
+  divendres <- brick(ncname,varname="CHL" )
+  coordinates(hh4)<-~Lng_cntwgs84+Lt_cntwgs84
+  v<-raster::extract(divendres,hh4)
+  hh5<-as.data.frame(v)
+  names(hh5)<-"chl_2m"
+  test<-data.frame(lon=hh4_df$Lng_cntwgs84,lat=hh4_df$Lt_cntwgs84,value=hh5$chl_2m)
+  t <- rasterFromXYZ(as.data.frame(test)[, c("lon", "lat", "value")])
+  plot(t)
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+chl_2m<-hh7$chl_2m
+##Join all variables extracted in same dataframe----
+grid_full<-cbind(grid,sst,chl,chl_2m,grad_sst,grad_chl,grad_chl_2m,grad_hmlmeso,grad_ek_L1,dist_coast,dist_smnt,dist_200m,dist_500m,dist_1000m,slope,depth)
+write.csv(grid_full,paste(prediction_envdir, "grid_full.csv"))
+
+grid_2.0<-grid[grid$Lt_cntwgs84<=40 & grid$Lt_cntwgs84>=36.299,]    
+grid_2.0<-grid_2.0[grid_2.0$Lng_cntwgs84>=-31.96 & grid_2.0$Lng_cntwgs84<=-23.56,]
+grid<-grid[grid$year!=2016,]
+grid$dum<-0
+saveRDS(grid,paste(prediction_envdir, "grid_simp.RDS"))
