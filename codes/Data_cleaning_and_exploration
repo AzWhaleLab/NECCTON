@@ -1,1 +1,141 @@
 
+#################################################################################################
+
+####Clean and prepare the segments dataframe to run the models###################################
+
+#### Created by Maria Inês Pinheiro da Silva and supervised by Sergi Pérez-Jorge ################
+
+############################## Date: 22  May 2025 ###############################################
+
+#################################################################################################
+
+# Set working directories
+
+path="path to tuna-fishing boat segments"
+envdir="path to store environmental data"
+spdymdir="CMEMS_Seapodym_forcing_variables"
+shapefile="path to shapefiles of the Azores"
+prediction_envdir="path to store environmental data for the predictions"
+models="path to store data for models"
+
+df<-read.csv(paste(envdir, "final_df.csv")) #30087 seg
+
+df<-df[-c(30,29,28,27,26,25,23,16,14,1)] #remove extra columns
+df$Date<-as.Date(df$Date) 
+df$year<-year(df$Date) #2001-2016
+df$month<-month(df$Date) #4-10
+df$month_f<-as.factor(df$month)
+df$year_f<-as.factor(df$year)
+
+df$code_boat<-as.factor(df$code_boat)
+df$code_obs<-as.factor(df$code_obs)
+
+#% seg with dde and sfr
+df_dde<-df[df$dde_presence==1,] #3645
+print((3645*100)/30087) #12.11%
+df_sfr<-df[df$sfr_presence==1,] #2104
+print((2104*100)/30087) #6.99%
+
+#NAs
+colSums(is.na(df))
+#sst:1327
+#chl/chl_2m:211
+#zooc/epi/zeu/npp:1544
+#umeso/umeso:2016
+#lmeso/mlmeso/hmlmeso:3817
+
+#effort
+df$eff_length<-df$eff_length/1000
+print(mean(df$eff_length,na.rm=T)) #8.04
+
+#remove positive depth
+df_d<-df[df$depth<=0,] #209
+df_d$depth<-df_d$depth*-1
+#remove Apr&Oct
+df_d410<-df_d[df_d$month>=5 & df_d$month<=9,] #375
+#remove 2016
+df_d41016<-df_d410[df_d410$year<2016,]#466
+
+df_2<-df_d41016
+rm(df_d,df_d410,df_d41016)
+
+#%removed
+209+275+466#=950
+print((950*100)/30087) #3.16%
+
+#% seg with dde and sfr
+df_dde<-df_2[df_2$dde_presence==1,] #3642
+print((3642*100)/29037) #12.54%
+df_sfr<-df_2[df_2$sfr_presence==1,] #2063
+print((2063*100)/29037) #7.10%
+
+#effort
+print(mean(df_2$eff_length,na.rm=T)) #8.04
+
+#NAs
+colSums(is.na(df_2))
+
+
+df_3<-df_2 %>% rowwise() %>% mutate(epi_night = sum(mnkc_epi, mnkc_mumeso, mnkc_hmlmeso, na.rm=TRUE))
+df_3<-as.data.frame(df_3)
+df_3<-df_3[-which(names(df_3) %in% c("mnkc_umeso","mnkc_mumeso","mnkc_lmeso","mnkc_mlmeso"))] #and remove lmeso/mlmeso &  umeso/mumeso var
+
+colSums(is.na(df_3))
+
+#remove all NAs
+df_4<-drop_na(df_3) 
+
+#correlation between variables
+library(corrplot)
+library(RColorBrewer)
+library(wesanderson)
+#calculate correlation p-values !mat is a matrix of data!
+cor.mtest <- function(mat, ...) {
+  mat <- as.matrix(mat)
+  n <- ncol(mat)
+  p.mat<- matrix(NA, n, n)
+  diag(p.mat) <- 0
+  for (i in 1:(n - 1)) {
+    for (j in (i + 1):n) {
+      tmp <- cor.test(mat[, i], mat[, j], ...)
+      p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+    }
+  }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+  p.mat
+}
+
+df.m<-as.matrix(df_4[,c("sst", "chl", "chl_2m", "depth", "slope", "dist_coast", "dist_smnt", "dist_200m", "dist_500m", "dist_1000m", 
+                         "zooc","mnkc_epi","mnkc_hmlmeso","zeu","npp","epi_night", "pelagic_layer_depth_L1", "pelagic_layer_depth_L2", "pelagic_layer_depth_L3",
+                        "T_L1", "T_L2", "T_L3","ek_L1","ek_L2","ek_L3","grad_sst","grad_chl","grad_chl_2m","grad_hmlmeso","grad_ek_L1")])
+c<-cor(df.m,use="complete.obs")
+p.cor<-cor.mtest(df.m)
+
+corrplot(c, method="color", type="lower", order="hclust",
+         col=pal,p.mat=p.cor,sig.level = 0.05,insig = "blank",
+         diag=F,tl.col = 'black',tl.srt = 90,tl.cex = .5,cl.pos="r",cl.cex = .7,cl.ratio = .1)
+
+#remove correlated variables and deep variables
+#T_L1, T_L2, T_L3, pelagic_layer_depth_L1, pelagic_layer_depth_L2. pelagic_layer_depth_L3, dist_500m. dist_1000m, dist_coast, zeu, npp, ek_L2, ek_L3
+df_5<-df_4[-which(names(df_4) %in% c("T_L1", "T_L2", "T_L3", "pelagic_layer_depth_L1", "pelagic_layer_depth_L2", "pelagic_layer_depth_L3", "dist_500m.", "dist_1000m", "dist_coast", "zeu", "npp", "epi_night", "ek_L2", "ek_L3"))]
+
+#VIF
+model_dde<-lm(dde_presence ~ sst + chl + chl_2m + depth + slope + dist_200m + zooc + mnkc_epi +
+                 + mnkc_hmlmeso  + ek_L1 + grad_sst + grad_chl + grad_chl_2m + grad_hmlmeso + grad_ek_L1, data=df_5)
+vif(model_dde)
+
+
+model_sfr<-lm(sfr_presence ~ sst + chl + chl_2m + depth + slope + dist_200m + zooc + mnkc_epi +
+                + mnkc_hmlmeso  + ek_L1 + grad_sst + grad_chl + grad_chl_2m + grad_hmlmeso + grad_ek_L1, data=df_5)
+vif(model_sfr)
+  
+#Check for outliers
+df_6<-df_5[df_5$grad_chl<=20,]
+
+#Create dum and random variables to run the models
+#dum => exclude random effects (observer & boat) from predictions
+#random => significant variables in BRT
+df_6$dum<-1
+df_6$random<-runif(25421, min=0, max=1)
+
+write.csv(df_6, paste(models, "df_models.csv"))
