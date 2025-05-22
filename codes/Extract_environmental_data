@@ -1,1 +1,1101 @@
 
+#################################################################################################
+
+####Extract environmental and prey data from the fishing surveys segments #######################
+
+#### Created by Maria Inês Pinheiro da Silva and supervised by Sergi Pérez-Jorge ################
+
+############################## Date: 22  May 2025 ###############################################
+
+#################################################################################################
+
+#4 types of environmental variables (daily NETCDF) were downloaded:
+# - Satellite based: SST and CHL
+# - SEAPODYM: micronekton and forcing variables
+# - Spatial gradients: from all dynamic variables
+# - Static variables
+
+# Set working directories
+
+path="path to tuna-fishing boat segments"
+envdir="path to store environmental data"
+spdymdir="CMEMS_Seapodym_forcing_variables"
+shapefile="path to shapefiles of the Azores"
+
+#####Load dataframe with all tuna-fishing boat segments####
+# An example of the dataframe can be found on the Github repository of this project#
+# The dataframe contains the following fields:
+# - Date (day/month/year)
+# - year
+# - month
+# - Lng_cntwgs84 (Longitude of the centroid of the segments on coordinate system WGS84)
+# - Lt_cntwgs84 (Latitude of the centroid of the segments on coordinate system WGS84)
+# - code_observer (The tuna-fishing surveys had multiple observers, and a specific code was allocated to each fisheries observer)
+# - code_boat (The tuna-fishing surveys had multiple boats, and a specific code was allocated to each fishing boat)
+# - dde_pres (presence of common dolphins (Delphinus delphis). This was code with 0 (absence) or 1 (presence))
+# - sfr_pres (presence of spotted dolphins (Stenella frontalis). This was code with 0 (absence) or 1 (presence))
+
+df<-read.csv(paste(path,"final_df_seg.csv"))
+
+nlev_Dates<-nlevels(factor(df$Date)) 
+list_Dates<-unique(df$Date)
+
+#####Extract SST and CHL#### daily netcdf
+
+sstdir=paste(envdir,"/SST/", sep="")
+chldir=paste0(envdir, "/CHL/", sep="")
+
+##Extract SST values from nc files----
+for (l in 1:length(list_Dates)){
+  print(list_Dates[l])
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(sstdir, "sst_", list_Dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="thetao")
+  hh4 <- raster::extract(divendres, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"sst"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+sst<-hh7$sst
+
+##Extract CHL values from nc files----
+for (l in 1:length(list_Dates)){
+  print(list_Dates[l])
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(chldir, "chl_", list_Dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="CHL")
+  hh4 <- raster::extract(divendres, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"chl"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+chl<-hh7$chl 
+
+##Extract CHL_2M values from nc files
+dates<-as.Date(list_Dates)
+
+dates1<-Date()
+dates1<- dates %m-% months(2)
+chl_2m<-dates1
+
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(chldir, "chl_", chl_2m[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="CHL")
+  hh4 <- raster::extract(divendres, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"chl_2m"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+chl_2m<-hh7$chl_2m 
+
+#####Extract SEAPODYM var####
+
+##1) Micronekton var + Zooc + zeu + npp
+spdymfiles <- list.files(paste(envir,"CMEMS_Seapodym", pattern = ".nc", full.names = TRUE, recursive =TRUE))
+hh3 <- separate(df, col=Date, into=c("year", "month", "day"), sep="-") 
+hh3$RSI<- paste(hh3$year,hh3$month, hh3$day, sep="") 
+hh3 <- hh3[order(hh3$RSI),] 
+RSI<-unique(hh3$RSI)
+rm(hh3)
+
+#Zooc
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  matching_index <- grep(paste0(RSI[l], ".nc$"), spdymfiles) # Find the index of the netcdf that ends with RSI[l]
+  ncname <- spdymfiles[matching_index] # Get the directory path of the matching file
+  divendres <- brick(ncname,varname="zooc")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"zooc"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+zooc<-hh7$zooc
+write.csv(zooc,paste(envdir, "zooc.csv"))
+
+#mnkc_epi
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  matching_index <- grep(paste0(RSI[l], ".nc$"), spdymfiles) # Find the index of the netcdf that ends with RSI[l]
+  ncname <- spdymfiles[matching_index] # Get the directory path of the matching file
+  divendres <- brick(ncname,varname="mnkc_epi")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"mnkc_epi"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+mnkc_epi<-hh7$mnkc_epi
+write.csv(mnkc_epi,paste(envdir, "mnkc_epi.csv"))
+
+#mnkc_umeso
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  matching_index <- grep(paste0(RSI[l], ".nc$"), spdymfiles) # Find the index of the netcdf that ends with RSI[l]
+  ncname <- spdymfiles[matching_index] # Get the directory path of the matching file
+  divendres <- brick(ncname,varname="mnkc_umeso")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"mnkc_umeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+mnkc_umeso<-hh7$mnkc_umeso
+write.csv(mnkc_umeso,paste(envdir, "mnkc_umeso.csv"))
+
+#mnkc_mumeso
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  matching_index <- grep(paste0(RSI[l], ".nc$"), spdymfiles) # Find the index of the netcdf that ends with RSI[l]
+  ncname <- spdymfiles[matching_index] # Get the directory path of the matching file
+  divendres <- brick(ncname,varname="mnkc_mumeso")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"mnkc_mumeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+mnkc_mumeso<-hh7$mnkc_mumeso
+write.csv(mnkc_mumeso,paste(envdir, "mnkc_mumeso.csv"))
+
+#mnkc_lmeso
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  matching_index <- grep(paste0(RSI[l], ".nc$"), spdymfiles) # Find the index of the netcdf that ends with RSI[l]
+  ncname <- spdymfiles[matching_index] # Get the directory path of the matching file
+  divendres <- brick(ncname,varname="mnkc_lmeso")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"mnkc_lmeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+mnkc_lmeso<-hh7$mnkc_lmeso
+write.csv(mnkc_lmeso,paste(envdir, "mnkc_lmeso.csv"))
+
+#mnkc_mlmeso
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  matching_index <- grep(paste0(RSI[l], ".nc$"), spdymfiles) # Find the index of the netcdf that ends with RSI[l]
+  ncname <- spdymfiles[matching_index] # Get the directory path of the matching file
+  divendres <- brick(ncname,varname="mnkc_mlmeso")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"mnkc_mlmeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+mnkc_mlmeso<-hh7$mnkc_mlmeso
+write.csv(mnkc_mlmeso,paste(envdir, "mnkc_mlmeso.csv"))
+
+#mnkc_hmlmeso
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  matching_index <- grep(paste0(RSI[l], ".nc$"), spdymfiles) # Find the index of the netcdf that ends with RSI[l]
+  ncname <- spdymfiles[matching_index] # Get the directory path of the matching file
+  divendres <- brick(ncname,varname="mnkc_hmlmeso")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"mnkc_hmlmeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+mnkc_hmlmeso<-hh7$mnkc_hmlmeso
+write.csv(mnkc_hmlmeso,paste(envdir, "mnkc_hmlmeso.csv"))
+
+#zeu
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  matching_index <- grep(paste0(RSI[l], ".nc$"), spdymfiles) # Find the index of the netcdf that ends with RSI[l]
+  ncname <- spdymfiles[matching_index] # Get the directory path of the matching file
+  divendres <- brick(ncname,varname="zeu")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"zeu"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+zeu<-hh7$zeu
+write.csv(zeu,paste(envdir, "zeu.csv"))
+
+#npp
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  matching_index <- grep(paste0(RSI[l], ".nc$"), spdymfiles) # Find the index of the netcdf that ends with RSI[l]
+  ncname <- spdymfiles[matching_index] # Get the directory path of the matching file
+  divendres <- brick(ncname,varname="npp")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"npp"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+npp<-hh7$npp
+write.csv(npp,paste(envdir, "npp.csv"))
+
+##2) Forcing variables
+
+####Variables - physical forcings (3 layers: L1, L2, L3):
+#Sea water pelagic layer bottom depth (pelagic_layer_depth)
+#Sea water potential temperature vertical mean over pelagic layer (T)
+#Eastward sea water velocity vertical mean over pelagic layer (U)
+#Northward sea water velocity vertical mean over pelagic layer (V)
+
+####### 1) pelagic_layer_depth 
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(spdymdir, year(list_Dates[l]), "/cmems_mod_glo_bgc_my_0.083deg-lmtl-Fphy_PT1D-I_", RSI[l], ".nc", sep="")  
+  divendres <- brick(ncname,varname="pelagic_layer_depth")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<- c("pelagic_layer_depth_L1", "pelagic_layer_depth_L2", "pelagic_layer_depth_L3")
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+pelagic_layer_depth<-hh7
+write.csv(pelagic_layer_depth,paste(envdir, "extracted_pelagic_layer_depth.csv"))
+
+
+####### 2) T 
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(spdymdir, year(list_Dates[l]), "/cmems_mod_glo_bgc_my_0.083deg-lmtl-Fphy_PT1D-I_", RSI[l], ".nc", sep="")  
+  divendres <- brick(ncname,varname="T")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<- c("T_L1", "T_L2", "T_L3")
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+T<-hh7
+write.csv(T,paste(envdir, "extracted_T.csv"))
+
+
+####### 3) U 
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(spdymdir, year(list_Dates[l]), "/cmems_mod_glo_bgc_my_0.083deg-lmtl-Fphy_PT1D-I_", RSI[l], ".nc", sep="")  
+  divendres <- brick(ncname,varname="U")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<- c("U_L1", "U_L2", "U_L3")
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+U<-hh7
+write.csv(U,paste(envdir, "extracted_U.csv"))
+
+
+####### 4) V 
+
+for (l in 1:nlev_Dates){
+  hh3<-subset(grid, grid$Date==list_Dates[l])
+  coordinates(hh3) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(spdymdir, year(list_Dates[l]), "/cmems_mod_glo_bgc_my_0.083deg-lmtl-Fphy_PT1D-I_", RSI[l], ".nc", sep="")  
+  divendres <- brick(ncname,varname="V")
+  hh4 <- raster::extract(divendres, hh3)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<- c("V_L1", "V_L2", "V_L3")
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+V<-hh7
+write.csv(V,paste(envdir, "extracted_V.csv"))
+
+
+#####Calculate and extract spatial gradients####
+library(grec)
+
+###Grad_SST##
+for (l in 1:length(list_Dates)){
+  print(list_Dates[l])
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(sstdir, "sst_", list_Dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="thetao")
+  e<-getGradients(x=divendres)
+  filename<-paste(sstdir,"Gradients/Gradsst_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=TRUE)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_sst"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+grad_sst<-hh7$Grad_sst
+
+#Grad_CHL##
+for (l in 1:length(list_Dates)){
+  print(list_Dates[l])
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(chldir, "chl_", list_Dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="CHL")
+  e<-getGradients(x=divendres)
+  filename<-paste(chldir,"Gradients/Gradchl_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_chl"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+grad_chl<-hh7$grad_chl
+
+###Grad_CHL_2m##
+dates<-as.Date(list_Dates)
+dates1<- dates %m-% months(2)
+
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(chldir, "chl_", dates1[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="CHL")
+  e<-getGradients(x=divendres)
+  filename<-paste(chldir,"Gradients/Gradchl2m_",dates1[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  print(dates1[l])
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_chl_2m"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+grad_chl_2m<-hh7$grad_chl_2m
+
+##Seapodym gradients
+
+####Add spatial gradients
+library(grec)
+
+seapodym_crop="path to seapodym files (https://data.marine.copernicus.eu/product/GLOBAL_ANALYSISFORECAST_BGC_001_028/description)"
+
+hmldir=paste(seapodym_crop,"/mnkc_hmlmeso/", sep="")
+mldir=paste(seapodym_crop,"/mnkc_mlmeso/", sep="")
+mudir=paste(seapodym_crop,"/mnkc_mumeso/", sep="")
+udir=paste(seapodym_crop,"/mnkc_umeso/", sep="")
+nppdir=paste(seapodym_crop,"/npp/", sep="")
+zoocdir=paste(seapodym_crop,"/zooc/", sep="")
+
+list_Dates<-unique(df$Date)
+l<-str_replace(list_Dates, "-", "")
+dates<-str_replace(l, "-", "")
+
+###Grad_hmlmeso##
+for (l in 1:length(dates)){
+  print(dates[l])
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(hmldir, "mnkc_hmlmeso_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="mnkc_hmlmeso")
+  e<-getGradients(x=divendres)
+  filename<-paste(hmldir,"Gradients/Grad_hmlmeso_",ldates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"grad_hmlmeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+
+grad_hmlmeso<-hh7$grad_hmlmeso
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(mldir, "mnkc_mlmeso_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="mnkc_mlmeso")
+  e<-getGradients(x=divendres)
+  filename<-paste(mldir,"Gradients/Grad_mlmeso_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_mlmeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_mlmeso<-hh7$Grad_mlmeso
+grad_mlmeso[is.na(grad_mlmeso)] <- 0
+write.csv(grad_mlmeso,paste(envdir, "grad_mlmeso.csv"))
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(mudir, "mnkc_mumeso_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="mnkc_mumeso")
+  e<-getGradients(x=divendres)
+  filename<-paste(mudir,"Gradients/Grad_mumeso_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_mumeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_mumeso<-hh7$Grad_mumeso
+grad_mumeso[is.na(grad_mumeso)] <- 0
+write.csv(grad_mumeso,paste(envdir, "grad_mumeso.csv"))
+
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(udir, "mnkc_umeso_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="mnkc_umeso")
+  e<-getGradients(x=divendres)
+  filename<-paste(udir,"Gradients/Grad_umeso_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_umeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_umeso<-hh7$Grad_umeso
+grad_umeso[is.na(grad_umeso)] <- 0
+write.csv(grad_umeso,paste(envdir, "grad_umeso.csv"))
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(nppdir, "npp_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="npp")
+  e<-getGradients(x=divendres)
+  filename<-paste(nppdir,"Gradients/Grad_npp_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_npp"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_npp<-hh7$Grad_npp
+grad_npp[is.na(grad_npp)] <- 0
+write.csv(grad_npp,paste(envdir, "grad_npp.csv"))
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(zoocdir, "zooc_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="zooc")
+  e<-getGradients(x=divendres)
+  filename<-paste(hmldir,"Gradients/Grad_zooc_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_zooc"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_zooc<-hh7$Grad_zooc
+grad_zooc[is.na(grad_zooc)] <- 0
+write.csv(grad_zooc,paste(envdir, "grad_zooc.csv"))
+
+
+#template
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(ldir, "mnkc_lmeso_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="mnkc_lmeso")
+  e<-getGradients(x=divendres)
+  filename<-paste(hmldir,"Gradients/Grad_lmeso_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_lmeso"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_lmeso<-hh7$Grad_lmeso
+grad_lmeso[is.na(grad_lmeso)] <- 0
+write.csv(grad_lmeso,paste(envdir, "grad_lmeso.csv"))
+
+################################################################################
+spdym_files = "path to forcing variables of the seapodym files (https://data.marine.copernicus.eu/product/GLOBAL_ANALYSISFORECAST_BGC_001_028/description)"
+
+fout = "path to sst_L1 of spdym_files"
+
+# Loop through each NetCDF file T_L1
+start<-proc.time()
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "T")
+  r_epipelagic <- r[[1]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "T_L1", overwrite = TRUE)
+}
+print((proc.time()-start)/60)
+
+fout = "path to sst_L2 of spdym_files"
+
+# Loop through each NetCDF file T_L2
+start<-proc.time()
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "T")
+  r_epipelagic <- r[[2]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "T_L2", overwrite = TRUE)
+}
+print((proc.time()-start)/60)
+
+fout = "path to sst_L3 of spdym_files"
+
+# Loop through each NetCDF file T_L3
+start<-proc.time()
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "T")
+  r_epipelagic <- r[[3]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "T_L3", overwrite = TRUE)
+}
+print((proc.time()-start)/60)
+
+fout = "path to u_L1 of spdym_files"
+
+# Loop through each NetCDF file U_L1
+start<-proc.time()
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "U")
+  r_epipelagic <- r[[1]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "U_L1", overwrite = TRUE)
+}
+print((proc.time()-start)/60)
+
+fout = "path to u_L2 of spdym_files"
+
+# Loop through each NetCDF file U_L2
+start<-proc.time()
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "U")
+  r_epipelagic <- r[[2]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "U_L2", overwrite = TRUE)
+}
+print((proc.time()-start)/60)
+
+fout = "path to u_L3 of spdym_files"
+
+# Loop through each NetCDF file U_L3
+start<-proc.time()
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "U")
+  r_epipelagic <- r[[3]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "U_L3", overwrite = TRUE)
+}
+print((proc.time()-start)/60)
+
+fout = "path to v_L1 of spdym_files"
+
+# Loop through each NetCDF file V_L1
+start<-proc.time()
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "V")
+  r_epipelagic <- r[[1]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "V_L1", overwrite = TRUE)
+}
+print((proc.time()-start)/60)
+
+fout = "path to v_L2 of spdym_files"
+
+# Loop through each NetCDF file V_L2
+start<-proc.time()
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "V")
+  r_epipelagic <- r[[2]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "V_L2", overwrite = TRUE)
+}
+print((proc.time()-start)/60)
+
+fout = "path to v_L3 of spdym_files"
+
+# Loop through each NetCDF file V_L3
+start<-proc.time()
+for (i in seq_along(spdym_files)) {     
+  # Read the NetCDF file and extract specified variables
+  r <- brick(spdym_files[i], varname = "V")
+  r_epipelagic <- r[[3]]
+  r_cropped <- crop(r_epipelagic, e)
+  writeRaster(r_cropped, filename = fout[i], format = "CDF",varname = "V_L3", overwrite = TRUE)
+}
+print((proc.time()-start)/60)
+
+
+
+spdym_files = "path to forcing variables of the seapodym files (https://data.marine.copernicus.eu/product/GLOBAL_ANALYSISFORECAST_BGC_001_028/description)"
+sst1dir=paste(spdym_files,"/sst_L1/", sep="")
+sst2dir=paste(spdym_files,"/sst_L2/", sep="")
+sst3dir=paste(spdym_files,"/sst_L3/", sep="")
+
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(sst1dir, "sst_L1_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="T_L1")
+  e<-getGradients(x=divendres)
+  filename<-paste(sst1dir,"Gradients/Grad_sst_L1_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_sst_L1"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_sst_L1<-hh7$Grad_sst_L1
+grad_sst_L1[is.na(grad_sst_L1)] <- 0
+write.csv(grad_sst_L1,paste(envdir, "grad_sst_L1.csv"))
+
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(sst2dir, "sst_L2_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="T_L2")
+  e<-getGradients(x=divendres)
+  filename<-paste(sst2dir,"Gradients/Grad_sst_L2_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_sst_L2"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_sst_L2<-hh7$Grad_sst_L2
+grad_sst_L2[is.na(grad_sst_L2)] <- 0
+write.csv(grad_sst_L2,paste(envdir, "grad_sst_L2.csv"))
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(sst3dir, "sst_L3_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="T_L3")
+  e<-getGradients(x=divendres)
+  filename<-paste(sst3dir,"Gradients/Grad_sst_L3_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_sst_L3"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_sst_L3<-hh7$Grad_sst_L3
+grad_sst_L3[is.na(grad_sst_L3)] <- 0
+write.csv(grad_sst_L3,paste(envdir, "grad_sst_L3.csv"))
+
+
+
+#####Calculate ek###########################
+
+fout = "path to ek_L1 files"
+
+for(i in seq_along(u_files)){
+  u <- raster(u_files[i],varname="U_L1")
+  v <- raster(v_files[i],varname="V_L1")
+  ek<-(u^2+v^2)/2
+  writeRaster(ek, filename=fout[i],varname = "ek_L1",overwrite=T)}
+
+fout = "path to ek_L2 files"
+
+for(i in seq_along(u_files)){
+  u <- raster(u_files[i],varname="U_L2")
+  v <- raster(v_files[i],varname="V_L2")
+  ek<-(u^2+v^2)/2
+  writeRaster(ek, filename=fout[i],varname = "ek_L2",overwrite=T)}
+
+fout = "path to ek_L3 files"
+
+for(i in seq_along(u_files)){
+  u <- raster(u_files[i],varname="U_L3")
+  v <- raster(v_files[i],varname="V_L3")
+  ek<-(u^2+v^2)/2
+  writeRaster(ek, filename=fout[i],varname = "ek_L3",overwrite=T)}
+
+#####Gradients ek##############
+
+ek1dir=paste(spdym_files,"/ek_L1/",sep="")
+ek2dir=paste(spdym_files,"/ek_L2/",sep="")
+ek3dir=paste(spdym_files,"/ek_L3/",sep="")
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(ek1dir, "ek_L1_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="layer")
+  e<-getGradients(x=divendres)
+  filename<-paste(ek1dir,"Gradients/Grad_ek_L1_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_ek_L1"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_ek_L1<-hh7$Grad_ek_L1
+grad_ek_L1[is.na(grad_ek_L1)] <- 0
+write.csv(grad_ek_L1,paste(envdir, "grad_ek_L1.csv"))
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(ek2dir, "ek_L2_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="ek_L2")
+  e<-getGradients(x=divendres)
+  filename<-paste(ek2dir,"Gradients/Grad_ek_L2_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_ek_L2"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_ek_L2<-hh7$Grad_ek_L2
+grad_ek_L2[is.na(grad_ek_L2)] <- 0
+write.csv(grad_ek_L2,paste(envdir, "grad_ek_L2.csv"))
+
+start<-proc.time()
+for (l in 1:length(list_Dates)){
+  hh4<-subset(df, df$Date==list_Dates[l])
+  coordinates(hh4) <- ~Lng_cntwgs84+Lt_cntwgs84
+  ncname<-paste(ek3dir, "ek_L3_", dates[l], ".nc", sep="")    
+  divendres <- raster(ncname,varname="ek_L3")
+  e<-getGradients(x=divendres)
+  filename<-paste(ek3dir,"Gradients/Grad_ek_L3_",list_Dates[l],".grd",sep="")
+  writeRaster(e, filename,overwrite=T)
+  hh4 <- raster::extract(e, hh4)
+  hh5<-as.data.frame(hh4)
+  names(hh5)<-"Grad_ek_L3"
+  if(l==1){
+    hh6<-hh5} else {
+      hh7<-rbind(hh6,hh5)
+      hh6<-hh7
+    }
+}
+print((proc.time()-start)/60)
+
+grad_ek_L3<-hh7$Grad_ek_L3
+grad_ek_L3[is.na(grad_ek_L3)] <- 0
+write.csv(grad_ek_L3,paste(envdir, "grad_ek_L3.csv"))
+
+
+#####Static variables####
+
+#Make the pma dataframe a Spatial object  
+dist<-df
+dist<- dist[order(dist$Date),]
+coordinates(dist)<- ~Lng_cntwgs84+Lt_cntwgs84
+proj4string(dist)<- CRS("+proj=longlat +ellps=WGS84 +datum=WGS84")
+dist<-cbind(dist, dist@coords)
+xypel<-dist[c("Lng_cntwgs84", "Lt_cntwgs84")]
+
+#Distance to coast
+coast <- shapefile(paste(shapefiles,"Azores.shp"))
+dist_coast<-NULL 
+
+for(i in 1:nrow(xypel)) {
+  dist_coast[i] <- dist2Line(xypel[i,], coast)
+}
+dist_coast<-as.data.frame(dist_coast)
+write.csv(dist_coast,paste(envdir, "dist_coast.csv"))
+
+#Distance to seamounts
+seamount <- shapefile(paste(shapefiles,"SMNTSall.shp"))
+dist_smnt<-NULL
+
+for(i in 1:nrow(xypel)) {
+  dist_smnt[i] <- dist2Line(xypel[i,], seamount)
+}
+dist_smnt<-as.data.frame(dist_smnt)
+write.csv(dist_smnt,paste(envdir, "dist_smnt.csv"))
+
+#Distance to 200m
+iso_200m <- shapefile(paste(shapefiles,"bat_UTM26N_200m.shp"))
+iso_200m<-sp::spTransform(iso_200m, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+dist_200m<-NULL 
+
+for(i in 1:nrow(xypel)) {
+  dist_200m[i] <- dist2Line(xypel[i,], iso_200m) }
+
+dist_200m<-as.data.frame(dist_200m)
+write.csv(dist_200m,paste(envdir, "dist_200m.csv"))
+
+#Distance to 500m
+iso_500m <- shapefile(paste(shapefiles,"bat_UTM26N_500m.shp"))
+iso_500m<-sp::spTransform(iso_500m, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+dist_500m<-NULL
+
+for(i in 1:nrow(xypel)) {
+  dist_500m[i] <- dist2Line(xypel[i,], iso_500m)}
+
+dist_500m<-as.data.frame(dist_500m)
+write.csv(dist_500m,paste(envdir, "dist_500m.csv"))
+
+#With the new shapefiles from Ricardo
+iso_500m <- shapefile(paste(shapefiles,"ctr_mdt_n_atlantic-500m.shp"))
+dist_500m<-NULL
+#start<-proc.time()
+for(i in 1:nrow(xypel)) {
+  dist_500m[i] <- dist2Line(xypel[i,], iso_500m)}
+#print((proc.time() - start)/60)
+
+dist_500m<-as.data.frame(dist_500m)
+write.csv(dist_500m,paste(envdir, "dist_500m_new.csv"))
+
+#Distance to 1000m 
+iso_1000m <- shapefile(paste(shapefiles,"bat_1000m.shp"))
+iso_1000m<-sp::spTransform(iso_1000m, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+
+dist_1000m<-NULL
+for(i in 1:nrow(xypel)) {
+  dist_1000m[i] <- dist2Line(xypel[i,], iso_1000m)}
+
+dist_1000m<-as.data.frame(dist_1000m)
+write.csv(dist_1000m,paste(envdir, "dist_1000m.csv"))
+
+#With the new shapefiles from Ricardo
+iso_1000m <- shapefile(paste(shapefiles,"ctr_mdt_n_atlantic-1000m.shp"))
+dist_1000m<-NULL
+start<-proc.time()
+for(i in 1:nrow(xypel)) {
+  dist_1000m[i] <- dist2Line(xypel[i,], iso_1000m)}
+print((proc.time() - start)/60)
+
+dist_1000m<-as.data.frame(dist_1000m)
+write.csv(dist_1000m,paste(envdir, "dist_1000m_new.csv"))
+
+#Distance to 2000m
+iso_2000m <- shapefile(paste(shapefiles,"bat_2000m.shp"))
+iso_2000m<-sp::spTransform(iso_2000m, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+
+dist_2000m<-NULL
+for(i in 1:nrow(xypel)) {
+  dist_2000m[i] <- dist2Line(xypel[i,], iso_2000m)}
+
+dist_2000m<-as.data.frame(dist_2000m)
+write.csv(dist_2000m,paste(envdir, "dist_2000m.csv"))
+
+#Distance to 3000m
+iso_3000m <- shapefile(paste(shapefiles,"bat_3000m.shp"))
+iso_3000m<-sp::spTransform(iso_3000m, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+
+dist_3000m<-NULL 
+for(i in 1:nrow(xypel)) {
+  dist_3000m[i] <- dist2Line(xypel[i,], iso_3000m)}
+
+dist_3000m<-as.data.frame(dist_3000m)
+write.csv(dist_3000m,paste(envdir, "dist_3000m.csv"))
+
+#Distance to 4000m 
+iso_4000m <- shapefile(paste(shapefiles,"bat_4000m.shp"))
+iso_4000m<-sp::spTransform(iso_4000m, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+
+dist_4000m<-NULL 
+for(i in 1:nrow(xypel)) {
+  dist_4000m[i] <- dist2Line(xypel[i,], iso_4000m)}
+
+dist_4000m<-as.data.frame(dist_4000m)
+write.csv(dist_4000m,paste(envdir, "dist_4000m.csv"))
+
+
+#Extract Depth and slope
+dist<-sp::spTransform(dist, CRS("+proj=utm +zone=26 +datum=WGS84 +units=m +no_defs"))
+dist<-cbind(dist, dist@coords)
+xypel<-dist[c("Lng_cntwgs84", "Lt_cntwgs84")]
+bathy<-raster(paste(shapefiles,"gebco_08_26N.img"))#26N
+
+slope28620d<-terrain(bathy, opt='slope', unit='degrees', neighbors=4, filename='slope28620d',overwrite=TRUE) #neighbors #4 (rook case),slope computed according to Fleming and Hoffer (1979) and Ritter (1987) 
+writeRaster(slope28620d,overwrite=TRUE, 'slope28620d.tif') 
+slope<-raster::extract(slope28620d, xypel, method='simple', buffer=NULL, small=FALSE, cellnumbers=FALSE, fun=NULL, na.rm=TRUE, layer, nl, df=FALSE, factors=FALSE) 
+slope<-as.data.frame(slope)
+write.csv(slope,paste(envdir, "slope.csv"))
+
+depth<-raster::extract(bathy, xypel, method='simple', buffer=NULL, small=FALSE, cellnumbers=FALSE, fun=NULL, na.rm=TRUE, layer, nl, df=FALSE, factors=FALSE) 
+depth<-as.data.frame(depth)
+write.csv(depth,paste(envdir, "depth.csv"))
+
+##Join all variables extracted in same dataframe----
+final_df<-cbind(df,sst,chl,chl_2m,zooc,mnkc_epi,mnkc_umeso,mnkc_mumeso,mnkc_lmeso,mnkc_mlmeso,mnkc_hmlmeso,zeu,npp,pelagic_layer_depth,T,U,V,grad_sst,grad_chl,grad_chl_2m,grad_hmlmeso,dist_coast,dist_smnt,dist_200m,dist_500m,dist_1000m,dist_2000m,dist_3000m,dist_4000m,slope,depth)
+write.csv(final_df,paste(envdir, "final_df.csv"))
